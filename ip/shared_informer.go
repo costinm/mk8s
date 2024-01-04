@@ -31,10 +31,9 @@ type K8SIPWatcher struct {
 	epInformer    coreinformers.EndpointsInformer
 	sliceInformer discoveryinformers.EndpointSliceInformer
 
-	Agent bool
-
 	// User data structures and callbacks. No direct deps on informers
 	*K8SData
+	Stop chan struct{}
 }
 
 // Run is used to wait for the sync to happen, and switch from initial sync to 'events' mode.
@@ -51,8 +50,6 @@ func (c *K8SIPWatcher) WaitForInit(stopCh chan struct{}) error {
 	return nil
 }
 
-var stop = make(chan struct{})
-
 // Start watching K8S, based on the config. The initial sync will happen in background -
 // main() can do other initialization, but before readiness must call WaitForSync.
 //
@@ -68,19 +65,20 @@ func Start(kd *K8SData, config *rest.Config) (*K8SIPWatcher, error) {
 
 	factory := informers.NewSharedInformerFactory(client, time.Hour*24)
 
-	pods, err := NewK8SWatcher(factory)
+	pods, err := newK8SWatcher(factory)
 	if err != nil {
 		return nil, err
 	}
 	pods.K8SData = kd
 
-	go factory.Start(stop)
+	pods.Stop = make(chan struct{})
+	go factory.Start(pods.Stop)
 
 	return pods, nil
 }
 
-// NewK8SWatcher creates a K8SIPWatcher
-func NewK8SWatcher(informerFactory informers.SharedInformerFactory) (*K8SIPWatcher, error) {
+// newK8SWatcher creates a K8SIPWatcher
+func newK8SWatcher(informerFactory informers.SharedInformerFactory) (*K8SIPWatcher, error) {
 
 	podInformer := informerFactory.Core().V1().Pods()
 	nodeInformer := informerFactory.Core().V1().Nodes()
