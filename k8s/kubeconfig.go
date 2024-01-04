@@ -103,6 +103,10 @@ func (kr *K8S) LoadKubeConfig(kc string) error {
 					Name:      k,
 					Namespace: ns,
 				}
+
+				// Can set restCfg.RateLimiter to replace defaults
+				restCfg.QPS = 100   // default is 5
+				restCfg.Burst = 200 // default 10
 				err := kcc.InitConfig(restCfg)
 				if err == nil {
 					kr.ByName[k] = kcc

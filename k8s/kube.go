@@ -10,13 +10,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/cert"
 
-	authenticationv1 "k8s.io/api/authentication/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 )
@@ -44,45 +37,6 @@ type K8S struct {
 
 	// LoadKubeConfig will populate this from a kubeconfig file
 	ByName map[string]*K8SCluster
-}
-
-// K8SCluster represents a single K8S cluster
-type K8SCluster struct {
-	// Loaded Config.
-	// The URL can be extracted with rest.DefaultServerURLFor(Config)
-	// Http client properly configured with rest.HTTPClientFor(Config)
-	Config *rest.Config
-
-	// The name should be mangled - gke_PROJECT_LOCATION_NAME or connectgateway_PROJECT_NAME
-	// or hostname.
-	// Best practice: fleet name, also part of the domain suffix
-	// Using the VENDOR_PROJECT_REGION_NAME for all would also be nice.
-	Name string
-
-	Namespace string
-
-	// TODO: lazy load. Should be cached.
-	Client *kubernetes.Clientset
-}
-
-func (k *K8SCluster) GcpInfo() (string, string, string) {
-	cf := k.Name
-	if strings.HasPrefix(cf, "gke_") {
-		parts := strings.Split(cf, "_")
-		if len(parts) > 3 {
-			// TODO: if env variable with cluster name/location are set - use that for context
-			return parts[1], parts[2], parts[3]
-		}
-	}
-	if strings.HasPrefix(cf, "connectgateway_") {
-		parts := strings.Split(cf, "_")
-		if len(parts) > 2 {
-			// TODO: if env variable with cluster name/location are set - use that for context
-			// TODO: if opinionanted naming scheme is used for cg names (location-name) - extract it.
-			return parts[1], "", parts[2]
-		}
-	}
-	return "", "", cf
 }
 
 // Init klog.InitFlags from an env (to avoid messing with the CLI of
@@ -179,22 +133,6 @@ func (kr *K8S) LocalCluster() error {
 	return kr.Default.InitConfig(config)
 }
 
-func (kr *K8SCluster) InitConfig(config *rest.Config) error {
-
-	kr.Config = config
-
-	var err error
-
-	// This is the generated ClientSet - with all possible k8s types...
-	// Only used to access the known types in kubernetes interface.
-	kr.Client, err = kubernetes.NewForConfig(config)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // InitK8SClient will discover a K8S config cluster and return the client.
 //
 // - KUBE_CONFIG takes priority, is checked first
@@ -222,42 +160,6 @@ func (kr *K8S) InitK8SClient(ctx context.Context) error {
 	return nil
 }
 
-// RestClient returns a K8S RESTClient for a specific resource.
-// apiPath is typically /api or /apis
-// version is v1, etc
-// group is "" for core resources.
-// Serializer defaults to scheme.Codecs.WithoutConversion()
-func (kr *K8SCluster) RestClient(apiPath, version string, group string,
-	c runtime.NegotiatedSerializer) (*rest.RESTClient, error) {
-	// makes a copy - we won't change the template
-	config := *kr.Config
-
-	config.APIPath = apiPath
-	config.GroupVersion = &schema.GroupVersion{Version: version, Group: group}
-	if c == nil {
-		c = scheme.Codecs.WithoutConversion()
-	}
-	config.NegotiatedSerializer = c
-
-	restClient, err := rest.RESTClientFor(&config)
-	return restClient, err
-}
-
-func (kr *K8SCluster) ConfigFor(apiPath, version string, group string,
-	c runtime.NegotiatedSerializer) *rest.Config {
-	// makes a copy - we won't change the template
-	config := *kr.Config
-
-	config.APIPath = apiPath
-	config.GroupVersion = &schema.GroupVersion{Version: version, Group: group}
-	if c == nil {
-		c = scheme.Codecs.WithoutConversion()
-	}
-	config.NegotiatedSerializer = c
-
-	return &config
-}
-
 func Is404(err error) bool {
 	if se, ok := err.(*k8serrors.StatusError); ok {
 		if se.ErrStatus.Code == 404 {
@@ -270,41 +172,17 @@ func Is404(err error) bool {
 // GetToken returns a token with the given audience for the current KSA, using CreateToken request.
 // Used by the STS token exchanger.
 func (kr *K8S) GetToken(ctx context.Context, aud string) (string, error) {
-	k := kr.Default
-	treq := &authenticationv1.TokenRequest{
-		Spec: authenticationv1.TokenRequestSpec{
-			Audiences: []string{aud},
-		},
-	}
-	ts, err := k.Client.CoreV1().ServiceAccounts(kr.Config.Namespace).CreateToken(ctx,
-		kr.Config.KSA, treq, metav1.CreateOptions{})
-	if err != nil {
-		return "", err
-	}
-
-	return ts.Status.Token, nil
+	return kr.Default.GetTokenRaw(ctx, kr.Config.Namespace, kr.Config.KSA, aud)
 }
 
 func (kr *K8S) GetCM(ctx context.Context, ns string, name string) (map[string]string, error) {
-	s, err := kr.Default.Client.CoreV1().ConfigMaps(ns).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if Is404(err) {
-			err = nil
-		}
-		return map[string]string{}, err
-	}
-
-	return s.Data, nil
+	return kr.Default.GetCM(ctx, ns, name)
 }
 
 func (kr *K8S) GetSecret(ctx context.Context, ns string, name string) (map[string][]byte, error) {
-	s, err := kr.Default.Client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if Is404(err) {
-			err = nil
-		}
-		return map[string][]byte{}, err
-	}
+	return kr.Default.GetSecret(ctx, ns, name)
+}
 
-	return s.Data, nil
+func Do(ctx context.Context, kr *rest.Request) rest.Result {
+	return kr.Do(ctx)
 }

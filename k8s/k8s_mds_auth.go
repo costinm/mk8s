@@ -11,12 +11,11 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// Plugin for K8S client to authenticate with a metadata server.
+// Plugin for K8S client to authenticate with a GCP or equivalent metadata server.
 //
 
 func init() {
-	RegisterTokenProvider("mds",
-		google.ComputeTokenSource("default"))
+	RegisterTokenProvider("mds", google.ComputeTokenSource("default"))
 }
 
 // Register an oauth2 token source. This takes a dep on the oauth2 library, but

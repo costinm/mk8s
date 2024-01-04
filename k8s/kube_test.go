@@ -1,8 +1,10 @@
 package k8s
 
 import (
+	"bytes"
 	"context"
 	"io/ioutil"
+	"k8s.io/apimachinery/pkg/types"
 	"log"
 	"net/http"
 	"path"
@@ -21,6 +23,140 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/homedir"
 )
+
+// k8s.io/client-go/kubernetes/scheme is the generated package - by client-gen
+// starts with runtime.NewScheme(),
+
+func TestUpdate(t *testing.T) {
+	SetK8SLogging("-v=9")
+	ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cf()
+
+	ks := &K8S{}
+	err := ks.InitK8SClient(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	k := ks.Default
+
+	rc, err := k.RestClient("/api", "v1", "", scheme.Codecs.WithoutConversion())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Use the RestClient to create
+	t.Run("rest-create", func(t *testing.T) {
+		// Cleanup first
+		err = k.Client.CoreV1().ConfigMaps("default").Delete(ctx, "test-create",
+			metav1.DeleteOptions{})
+
+		obj := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-create",
+				Namespace: "default"},
+			Data: map[string]string{"a": "b"}}
+
+		// Create a request - only works the first time (otherwise 'conflict'
+		kr := rc.Post().Body(obj).Resource("configmaps").
+			Namespace("default")
+		kres := kr.Do(ctx)
+		if kres.Error() != nil {
+			t.Fatal(kres.Error())
+		}
+
+		// Raw returns the json bytes, raw format.
+		resb, _ := kres.Raw()
+		log.Println(len(resb))
+
+		pl, _ := kres.Get()
+		log.Println(pl)
+
+		// Verify it was set
+		cm, err := k.Client.CoreV1().ConfigMaps("default").Get(ctx,
+			"test-create", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cm.Data["a"] != "b" {
+			t.Error("not found", cm)
+		}
+	})
+
+	// Use the RestClient to create
+	t.Run("rest-update", func(t *testing.T) {
+		obj := &v1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "update", Namespace: "default"}}
+		cm, err := k.Client.CoreV1().ConfigMaps("default").Get(ctx, "update", metav1.GetOptions{})
+		if err != nil {
+			cm, err = k.Client.CoreV1().ConfigMaps("default").Create(ctx, obj, metav1.CreateOptions{})
+		}
+
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data["a"] = "d"
+
+		// Create a request - only works the first time (otherwise 'conflict'
+		kres := rc.Put().Body(cm).Resource("configmaps").
+			Namespace("default").Name("update").Do(ctx)
+
+		cm, err = k.Client.CoreV1().ConfigMaps("default").Get(ctx, "update", metav1.GetOptions{})
+		log.Println(cm)
+
+		if kres.Error() != nil {
+			t.Fatal(kres.Error())
+		}
+		resb, err := kres.Raw()
+		log.Println(len(resb))
+
+		pl, err := kres.Get()
+		log.Println(pl)
+
+		t.Run("rest-patch", func(t *testing.T) {
+			// Create a request - only works the first time (otherwise 'conflict'
+			kres := rc.Patch(types.JSONPatchType).
+				Body([]byte(`[{"op":"replace", "value":"c", "path":"/data/a"}]`)).
+				Resource("configmaps").
+				Namespace("default").
+				Name("update").Do(ctx)
+
+			// Other options: merge, apply, strategicmerge
+
+			resb, err := kres.Raw()
+			if err != nil {
+				t.Fatal(err)
+			}
+			log.Println(len(resb))
+
+			pl, err := kres.Get()
+			log.Println(pl)
+			cm, err := k.Client.CoreV1().ConfigMaps("default").Get(ctx,
+				"update", metav1.GetOptions{})
+			if cm.Data["a"] != "c" {
+				t.Error("not found", cm)
+			}
+		})
+	})
+
+	t.Run("raw", func(t *testing.T) {
+		obj := &v1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "fooraw", Namespace: "default"}}
+		body, _ := runtime.Encode(scheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), obj)
+
+		url, _, _ := rest.DefaultServerUrlFor(k.Config)
+		hc, _ := rest.HTTPClientFor(k.Config)
+
+		r, err := http.NewRequestWithContext(ctx, "POST",
+			url.String()+"/api/v1/namespaces/default/configmaps", bytes.NewReader(body))
+		res, err := hc.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resb, err := ioutil.ReadAll(res.Body)
+		log.Println(string(resb))
+
+	})
+
+}
 
 // Direct watch using the client.
 func TestWatch(t *testing.T) {

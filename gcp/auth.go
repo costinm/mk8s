@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"github.com/costinm/meshauth"
-	"github.com/costinm/meshauth/pkg/uk8s"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	crm "google.golang.org/api/cloudresourcemanager/v1"
@@ -95,8 +94,6 @@ func GcpInit(ctx context.Context, mds *meshauth.MeshAuth, acct string) error {
 		AccessTokenSource: ts,
 		GSA:               acct,
 	}
-	// To get custom audience token sources:
-	//creds.NewTokenSource()
 
 	// creds.JSON may have additional info.
 	// Examples:
@@ -122,8 +119,8 @@ type GCPAuthProvider struct {
 	GSA string
 }
 
-func (gcp *GCPAuthProvider) GetToken(ctx context.Context, s string) (string, error) {
-	if s != "" {
+func (gcp *GCPAuthProvider) GetToken(ctx context.Context, aud string) (string, error) {
+	if aud != "" {
 		// https://cloud.google.com/docs/authentication/get-id-token#go
 		//
 		// This has 2 problems:
@@ -155,10 +152,11 @@ func (gcp *GCPAuthProvider) GetToken(ctx context.Context, s string) (string, err
 		access, err := gcp.AccessTokenSource.Token()
 		meshauth.Debug = true
 
-		gcpa := uk8s.NewGCPTokenSource(&uk8s.GCPAuthConfig{
+		gcpa := meshauth.NewFederatedTokenSource(&meshauth.STSAuthConfig{
 			GSA: gcp.GSA,
 		})
-		t, err := gcpa.TokenGSA(ctx, access.AccessToken, s)
+
+		t, err := gcpa.TokenGSA(ctx, access.AccessToken, aud)
 		return t, err
 	}
 
