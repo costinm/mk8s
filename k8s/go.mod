@@ -4,6 +4,8 @@ go 1.22.0
 
 toolchain go1.22.2
 
+replace github.com/imdario/mergo => github.com/imdario/mergo v0.3.16
+
 require (
 	golang.org/x/oauth2 v0.20.0
 	k8s.io/api v0.30.1
