@@ -16,51 +16,81 @@ import (
 
 // K8SConfig has general config for a set of clusters.
 type K8SConfig struct {
-	// Logging options for K8S. Will be set in klog.
-	Logging string
-
+	// Namespace to use by default
 	Namespace string
 
+	// KSA to use by default for getting tokens.
 	KSA string
-	GSA string
 }
 
 // K8S implements the common interface for a set of K8S APIservers
-// or servers implementing same patterns.
+// or servers implementing K8S patterns.
 type K8S struct {
 	Config *K8SConfig
 
-	TokenProvider interface{}
-
-	// InCluster (if possible), followed by LoadKubeConfig or GKE config.
+	// Primary config cluster - current context in config, in-cluster
+	// picked by config
 	Default *K8SCluster
 
-	// LoadKubeConfig will populate this from a kubeconfig file
+	// LoadKubeConfig will populate this from a kubeconfig file,
+	// followed optionally by GKE or other sources.
 	ByName map[string]*K8SCluster
 }
-
-// Init klog.InitFlags from an env (to avoid messing with the CLI of
-// the app). For example -v=9 lists full request content, -v=7 lists requests headers
-//func init() {
-//	fs := &flag.FlagSet{}
-//	klog.InitFlags(fs)
-//	kf := strings.Split(os.Getenv("KLOG_FLAGS"), " ")
-//	fs.Parse(kf)
-//}
 
 // NewK8S will initialize a K8S cluster set.
 //
 // If running in cluster, the 'local' cluster will be the default.
 // Additional clusters can be loaded from istio kubeconfig files, kubeconfig, GKE, Fleet.
-func NewK8S(kc *K8SConfig) *K8S {
+func New(ctx context.Context, kc *K8SConfig) (*K8S, error) {
 	if kc == nil {
 		kc = &K8SConfig{}
 	}
-	if kc.Logging == "" {
-		kc.Logging = os.Getenv("KLOG_FLAGS")
+	logging := os.Getenv("KLOG_FLAGS")
+	if logging != "" {
+		// Env instead of CLI args
+		SetK8SLogging(logging)
 	}
-	SetK8SLogging(kc.Logging)
-	return &K8S{Config: kc}
+	k := &K8S{Config: kc,
+		ByName: map[string]*K8SCluster{}}
+	err := k.init(ctx)
+	return k, err
+}
+
+// init will discover a K8S config cluster and return the client.
+//
+// - KUBE_CONFIG takes priority, is checked first
+// - in cluster is probed if KUBE_CONFIG is missing.
+//
+// Istio Server.initKubeClient handles it for Istio:
+// - FileDir fakes it using files (config controller)
+// - local MeshConfig from args is read
+// - if no configSources or CLI kubeconfig - use it.
+func (kr *K8S) init(ctx context.Context) error {
+	defer func() {
+		if kr.Default != nil {
+			if kr.Default.Namespace == "" {
+				kr.Default.Namespace = "default"
+			}
+			if kr.Default.Name == "" {
+				kr.Default.Name = "default"
+			}
+		}
+	}()
+	if kr.Default != nil {
+		return nil
+	}
+
+	err := kr.LoadKubeConfig("")
+	if err != nil {
+		return err
+	}
+
+	err = kr.loadInCluster()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Init klog.InitFlags from an env (to avoid messing with the CLI of
@@ -82,13 +112,22 @@ const (
 	rootCAFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
 
-// LocalCluster returns a cluster determined based on in-cluster or MDS config.
+// loadInCluster returns a cluster determined based on in-cluster or MDS config.
 // The extended MDS server is used to cache cluster info to avoid GKE lookups.
 // Equivalent to rest.InClusterConfig.
-func (kr *K8S) LocalCluster() error {
+func (kr *K8S) loadInCluster() error {
 	token, err := os.ReadFile(tokenFile)
 	if err != nil {
 		return nil
+	}
+
+	tlsClientConfig := rest.TLSClientConfig{}
+
+	if _, err := cert.NewPool(rootCAFile); err != nil {
+		klog.Errorf("Expected to load root CA config from %s, but got err: %v", rootCAFile, err)
+		return err
+	} else {
+		tlsClientConfig.CAFile = rootCAFile
 	}
 
 	// Instead of checking for host, look for the token files
@@ -103,14 +142,6 @@ func (kr *K8S) LocalCluster() error {
 		port = "443"
 	}
 
-	tlsClientConfig := rest.TLSClientConfig{}
-
-	if _, err := cert.NewPool(rootCAFile); err != nil {
-		klog.Errorf("Expected to load root CA config from %s, but got err: %v", rootCAFile, err)
-	} else {
-		tlsClientConfig.CAFile = rootCAFile
-	}
-
 	config := &rest.Config{
 		// TODO: switch to using cluster DNS.
 		Host:            "https://" + net.JoinHostPort(host, port),
@@ -119,42 +150,15 @@ func (kr *K8S) LocalCluster() error {
 		BearerTokenFile: tokenFile,
 	}
 
-	// Rest: in cluster doesn't use kubeconfig
-	//config, err := rest.InClusterConfig()
-	//if err != nil {
-	//	panic(err)
-	//}
-
-	kr.Default = &K8SCluster{
+	ic := &K8SCluster{
 		Name:      "incluster",
 		Namespace: os.Getenv("POD_NAMESPACE"),
+		Config:    config,
 	}
 
-	return kr.Default.InitConfig(config)
-}
-
-// InitK8SClient will discover a K8S config cluster and return the client.
-//
-// - KUBE_CONFIG takes priority, is checked first
-// - in cluster is probed if KUBE_CONFIG is missing.
-//
-// Istio Server.initKubeClient handles it for Istio:
-// - FileDir fakes it using files (config controller)
-// - local MeshConfig from args is read
-// - if no configSources or CLI kubeconfig - use it.
-func (kr *K8S) InitK8SClient(ctx context.Context) error {
-	if kr.Default != nil {
-		return nil
-	}
-
-	err := kr.LocalCluster()
-	if err != nil {
-		return err
-	}
-
-	err = kr.LoadKubeConfig("")
-	if err != nil {
-		return err
+	kr.ByName[ic.Name] = ic
+	if kr.Default == nil {
+		kr.Default = ic
 	}
 
 	return nil
@@ -169,20 +173,13 @@ func Is404(err error) bool {
 	return false
 }
 
-// GetToken returns a token with the given audience for the current KSA, using CreateToken request.
+// GetToken returns a token with the given audience for the default KSA, using CreateToken request.
 // Used by the STS token exchanger.
 func (kr *K8S) GetToken(ctx context.Context, aud string) (string, error) {
-	return kr.Default.GetTokenRaw(ctx, kr.Config.Namespace, kr.Config.KSA, aud)
+	return kr.Default.GetTokenRaw(ctx,
+		kr.Config.Namespace, kr.Config.KSA, aud)
 }
 
-func (kr *K8S) GetCM(ctx context.Context, ns string, name string) (map[string]string, error) {
-	return kr.Default.GetCM(ctx, ns, name)
-}
-
-func (kr *K8S) GetSecret(ctx context.Context, ns string, name string) (map[string][]byte, error) {
-	return kr.Default.GetSecret(ctx, ns, name)
-}
-
-func Do(ctx context.Context, kr *rest.Request) rest.Result {
-	return kr.Do(ctx)
-}
+//func Do(ctx context.Context, kr *rest.Request) rest.Result {
+//	return kr.Do(ctx)
+//}

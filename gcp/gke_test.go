@@ -18,112 +18,128 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/url"
-	"os"
 	"testing"
 	"time"
 
-	"cloud.google.com/go/compute/metadata"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"k8s.io/client-go/kubernetes"
+	"github.com/costinm/meshauth"
+	k8sc "github.com/costinm/mk8s/k8s"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 // Requires real or local metadata server.
 // The GCP SA must have k8s api permission.
 func TestK8S(t *testing.T) {
-	//os.Mkdir("../../out", 0775)
-	//os.Chdir("../../out")
-
-	// This or iptables redirect for 169.254.169.254.
-	// When running in GKE or GCP - want to use the custom MDS not the platform one.
-	// This must be set before metadata package is used - it detects.
-	if os.Getenv("GCE_METADATA_HOST") == "" {
-		os.Setenv("GCE_METADATA_HOST", "localhost:15014")
-	}
-
 	// For the entire test
 	ctx, cf := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cf()
 
-	kr := &GKE{}
+	// This or iptables redirect for 169.254.169.254.
+	// When running in GKE or GCP - want to use the custom MDS not the platform one.
+	// This must be set before metadata package is used - it detects.
+	//if os.Getenv("GCE_METADATA_HOST") == "" {
+	//	os.Setenv("GCE_METADATA_HOST", "localhost:15014")
+	//}
 
-	// If running in GCP, get ProjectId from meta
-	kr.DefaultsFromEnvAndMD(ctx)
-	if kr.ProjectId == "" {
-		if !metadata.OnGCE() {
-			t.Skip("Not on GCE and MDS not forwarded")
-		}
-		t.Skip("Failed to identify project ID")
+	gke, err := New(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+
+	// Basic access token -
+	access, err := gke.GetToken(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should be a federated token
+	t.Log("Token", "federated access", access[0:7])
+
+	if gke.MeshCfg.MDS.Project.NumericProjectId == 0 {
+		// Verify resource manager works
+		t.Log("On demand number:", gke.NumericProjectId())
+	}
+
+	// Can't return JWT tokens signed by google for federated identities, but K8S can.
+	access, err = gke.K8S.Default.GetToken(ctx, "dummy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := meshauth.DecodeJWT(access)
+	t.Log("Token", "k8s", j.String())
+
+	istio_ca, err := gke.GetToken(ctx, "istio_ca")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	j = meshauth.DecodeJWT(istio_ca)
+	t.Log("Token", "jwt", j.String())
+
+	// GcpInit should also populate project ID.
+	t.Log("Meta", "projectID", gke.MeshCfg.MDS.Project.ProjectId)
 
 	// Update the list of clusters.
-	cl, err := kr.FindClusters(ctx, "", "us-central1")
+	cl, err := gke.LoadGKEClusters(ctx, "", "us-central1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cl) == 0 {
+		t.Fatal("No clusters in " + gke.ProjectId())
+	}
+
+	cl, err = gke.LoadGKEClusters(ctx, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(cl) == 0 {
-		t.Fatal("No clusters in " + kr.ProjectId)
-	}
-	if len(cl) == 0 {
-		t.Fatal("No clusters in " + kr.ProjectId)
+		t.Fatal("No clusters in " + gke.ProjectId())
 	}
 
-	cl, err = kr.FindClusters(ctx, "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cl) == 0 {
-		t.Fatal("No clusters in " + kr.ProjectId)
-	}
+	gke.LoadHubClusters(ctx, "")
 
-	err = kr.PickCluster(ctx, cl)
-	testCluster := kr.Cluster
+	testCluster := gke.K8S.Default
 
-	for _, c := range cl {
-		if c.ClusterName == "big1" {
-			testCluster = c
-		}
+	for _, c := range gke.K8S.ByName {
+		//if strings.Contains(c.Name, "big1") {
+		//	testCluster = c
+		//}
+		c := c
+		checkClient(c)
 	}
 
-	rc := testCluster.RestConfig()
+	//rc := testCluster.Config
 
-	log.Printf("%v\n%v\n", testCluster.restConfig, rc)
+	//log.Printf("%v\n%v\n", testCluster.Name, rc)
 
 	// Run the tests on the first found cluster, unless the test is run with env variables to select a specific
 	// location and cluster name.
 
-	t.Run("explicitGKE", func(t *testing.T) {
-		kr1 := &GKE{}
-		kr1.MeshAddr, _ = url.Parse("gke://" + kr.ProjectId)
+	// Explicit GKE project configured. Will find some credentials and use it
+	t.Run("configClusterExplicit", func(t *testing.T) {
+		p, l, n := testCluster.GcpInfo()
+		meshAddr := fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", p, l, n)
 
-		err = kr1.InitGKE(ctx)
+		kr1, err := New(ctx, &meshauth.MeshCfg{MeshAddr: meshAddr})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if kr1.Client == nil {
-			t.Fatal("No client")
-		}
 
-		err = checkClient(kr1.Client)
+		err = checkClient(kr1.K8S.Default)
 		if err != nil {
 			t.Fatal(err)
 		}
 	})
 
-	t.Run("configClusterExplicit", func(t *testing.T) {
-		kr1 := &GKE{}
-		kr1.MeshAddr, _ = url.Parse(fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", testCluster.ProjectId, testCluster.ClusterLocation, testCluster.ClusterName))
-
-		err = kr1.InitGKE(ctx)
+	// A GKE project provided - will list it and pick best cluster.
+	t.Run("explicitGKEFind", func(t *testing.T) {
+		kr1, err := New(ctx, &meshauth.MeshCfg{MeshAddr: "gke://" + gke.ProjectId()})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if kr1.Client == nil {
-			t.Fatal("No client")
-		}
 
-		err = checkClient(kr1.Client)
+		err = checkClient(kr1.K8S.Default)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,17 +147,21 @@ func TestK8S(t *testing.T) {
 
 }
 
-func checkClient(kc *kubernetes.Clientset) error {
-	v, err := kc.ServerVersion() // /version on the server
+func checkClient(kc *k8sc.K8SCluster) error {
+	v, err := kc.Client().ServerVersion() // /version on the server
 	if err != nil {
+		log.Println("GKECluster version error", kc.Name, err)
 		return err
 	}
-	log.Println("GKECluster version", v)
+	log.Println("GKECluster version", kc.Name, kc.Namespace, kc.KSA, v)
 
-	_, err = kc.CoreV1().ConfigMaps("istio-system").Get(context.Background(), "mesh", metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
+	//sv, err := kc.ServerVersion()
+	////CoreV1().ConfigMaps("istio-system").Get(context.Background(), "mesh", metav1.GetOptions{})
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//log.Println(sv.String())
 
 	//_, err = kc.CoreV1().ConfigMaps("istio-system").List(context.Background(), metav1.ListOptions{})
 	//if err != nil {
@@ -149,4 +169,59 @@ func checkClient(kc *kubernetes.Clientset) error {
 	//}
 
 	return nil
+}
+
+// Use GCP credentials (downloaded SA) or gcloud as trust source.
+func TestGCPWithK8SSource(t *testing.T) {
+
+	ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cf()
+
+	// Usual pattern is to use google.DefaultTokenSource - which internally calls this.
+	// The order is:
+	// - check GOOGLE_APPLICATION_CREDENTIALS - should be downloaded service account, can produce JWTs
+	// - ~/.config/gcloud/application_default_credentials.json"
+	// - use metadata
+	creds, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
+
+	if err != nil {
+		t.Skip(err)
+	}
+	testTS(t, creds.TokenSource)
+}
+
+func TestSDK(t *testing.T) {
+
+	ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cf()
+
+	// .config/gcloud/credentials and .config/gcloud/properties
+	// The properties file include core/account - the default account to use.
+	// credentials include a refresh token and possibly cached access token.
+	sdkCfg, err := google.NewSDKConfig("")
+	if err != nil {
+		t.Skip("No .config/gcloud/credentials")
+	}
+
+	// creds.JSON may have additional info.
+	// Examples:
+	// {
+	//   // ???
+	//  "client_id": "32555940559.apps.googleusercontent.com",
+	//  "client_secret": "",
+	//  "refresh_token": "1//...",
+	//  "type": "authorized_user"
+	//}
+	// CredentialsFromJSON can also parse a file.
+
+	ts := sdkCfg.TokenSource(ctx)
+	testTS(t, ts)
+}
+
+func testTS(t *testing.T, ts oauth2.TokenSource) {
+	tt, err := ts.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("Token", tt.AccessToken[0:7])
 }

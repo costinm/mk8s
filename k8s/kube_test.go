@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"io/ioutil"
-	"k8s.io/apimachinery/pkg/types"
 	"log"
 	"net/http"
 	"path"
 	"testing"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,11 +33,7 @@ func TestUpdate(t *testing.T) {
 	ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cf()
 
-	ks := &K8S{}
-	err := ks.InitK8SClient(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ks, err := New(ctx, nil)
 
 	k := ks.Default
 
@@ -48,7 +45,7 @@ func TestUpdate(t *testing.T) {
 	// Use the RestClient to create
 	t.Run("rest-create", func(t *testing.T) {
 		// Cleanup first
-		err = k.Client.CoreV1().ConfigMaps("default").Delete(ctx, "test-create",
+		err = k.Client().CoreV1().ConfigMaps("default").Delete(ctx, "test-create",
 			metav1.DeleteOptions{})
 
 		obj := &v1.ConfigMap{
@@ -73,7 +70,7 @@ func TestUpdate(t *testing.T) {
 		log.Println(pl)
 
 		// Verify it was set
-		cm, err := k.Client.CoreV1().ConfigMaps("default").Get(ctx,
+		cm, err := k.Client().CoreV1().ConfigMaps("default").Get(ctx,
 			"test-create", metav1.GetOptions{})
 		if err != nil {
 			t.Fatal(err)
@@ -86,9 +83,9 @@ func TestUpdate(t *testing.T) {
 	// Use the RestClient to create
 	t.Run("rest-update", func(t *testing.T) {
 		obj := &v1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "update", Namespace: "default"}}
-		cm, err := k.Client.CoreV1().ConfigMaps("default").Get(ctx, "update", metav1.GetOptions{})
+		cm, err := k.Client().CoreV1().ConfigMaps("default").Get(ctx, "update", metav1.GetOptions{})
 		if err != nil {
-			cm, err = k.Client.CoreV1().ConfigMaps("default").Create(ctx, obj, metav1.CreateOptions{})
+			cm, err = k.Client().CoreV1().ConfigMaps("default").Create(ctx, obj, metav1.CreateOptions{})
 		}
 
 		if cm.Data == nil {
@@ -100,7 +97,7 @@ func TestUpdate(t *testing.T) {
 		kres := rc.Put().Body(cm).Resource("configmaps").
 			Namespace("default").Name("update").Do(ctx)
 
-		cm, err = k.Client.CoreV1().ConfigMaps("default").Get(ctx, "update", metav1.GetOptions{})
+		cm, err = k.Client().CoreV1().ConfigMaps("default").Get(ctx, "update", metav1.GetOptions{})
 		log.Println(cm)
 
 		if kres.Error() != nil {
@@ -130,7 +127,7 @@ func TestUpdate(t *testing.T) {
 
 			pl, err := kres.Get()
 			log.Println(pl)
-			cm, err := k.Client.CoreV1().ConfigMaps("default").Get(ctx,
+			cm, err := k.Client().CoreV1().ConfigMaps("default").Get(ctx,
 				"update", metav1.GetOptions{})
 			if cm.Data["a"] != "c" {
 				t.Error("not found", cm)
@@ -163,7 +160,7 @@ func TestWatch(t *testing.T) {
 	SetK8SLogging("-v=9")
 
 	ks := &K8S{}
-	err := ks.InitK8SClient(context.Background())
+	err := ks.init(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +371,7 @@ func TestWatch(t *testing.T) {
 func TestRawWatch(t *testing.T) {
 	SetK8SLogging("-v=9")
 	k := &K8S{}
-	err := k.InitK8SClient(context.Background())
+	err := k.init(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

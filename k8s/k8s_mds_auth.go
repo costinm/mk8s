@@ -5,18 +5,14 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
-	"k8s.io/client-go/transport"
 
-	"golang.org/x/oauth2/google"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/transport"
 )
 
 // Plugin for K8S client to authenticate with a GCP or equivalent metadata server.
-//
-
-func init() {
-	RegisterTokenProvider("mds", google.ComputeTokenSource("default"))
-}
+// The provider was removed from the tree, alternative is an exec plugin to include
+// in all docker images.
 
 // Register an oauth2 token source. This takes a dep on the oauth2 library, but
 // client already depends on it.
