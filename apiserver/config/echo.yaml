@@ -1,0 +1,8 @@
+# $ kubectl --kubeconfig kubeconfig api-resources
+
+apiVersion: echo.costinm.github.com/v1
+kind: Echo
+metadata:
+  name: echo
+spec:
+  Msg: hi
