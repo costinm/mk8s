@@ -21,6 +21,8 @@ import (
 
 	echov1 "github.com/costinm/mk8s/apiserver/pkg/apis/echo/v1"
 	v1 "github.com/costinm/mk8s/apiserver/pkg/apis/echo/v1"
+	echooapi "github.com/costinm/mk8s/apiserver/pkg/openapi"
+	"k8s.io/apiextensions-apiserver/pkg/generated/openapi"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	kubeopenapi "k8s.io/kube-openapi/pkg/common"
 )
 
 var (
@@ -176,3 +179,14 @@ func (f *EchoHandler) List(ctx context.Context, options *metainternalversion.Lis
 func (f *EchoHandler) ConvertToTable(ctx context.Context, object runtime.Object, tableOptions runtime.Object) (*metav1.Table, error) {
 	return nil, nil
 }
+
+
+func GetOpenAPIDefinitions(r kubeopenapi.ReferenceCallback) map[string]kubeopenapi.OpenAPIDefinition {
+	m1 := openapi.GetOpenAPIDefinitions(r)
+	m2 := echooapi.GetOpenAPIDefinitions(r)
+	for k, v := range m2 {
+		m1[k] = v
+	}
+	return m1
+}
+
