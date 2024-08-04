@@ -100,7 +100,7 @@ func (kr *K8SCluster) Client() *kubernetes.Clientset {
 		var err error
 		kr.client, err = kubernetes.NewForConfig(kr.RestConfig)
 		if err != nil {
-			slog.Error("Failed to create K8S client", "err")
+			slog.Error("Failed to create K8S client", "err", err)
 		}
 	}
 	return kr.client

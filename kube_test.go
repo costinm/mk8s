@@ -3,10 +3,10 @@ package mk8s
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"path"
 	"testing"
 	"time"
 
@@ -18,11 +18,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
-	"k8s.io/client-go/discovery/cached/disk"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/util/homedir"
 )
 
 // k8s.io/client-go/kubernetes/scheme is the generated package - by client-gen
@@ -31,7 +29,18 @@ import (
 // TODO: some testing with Informer and check the Store.
 // TODO: can we use Informer with disk cache and saved lastSync ?
 
-func TestUpdate(t *testing.T) {
+func ExampleStart()  {
+	ctx := context.Background()
+	ks, err := New(ctx, nil)
+	if err != nil {
+		return
+	}
+	fmt.Println(ks.Default != nil)
+	// Output: true
+}
+
+
+func TestModes(t *testing.T) {
 	SetK8SLogging("-v=9")
 	ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cf()
@@ -162,8 +171,7 @@ func TestUpdate(t *testing.T) {
 func TestWatch(t *testing.T) {
 	SetK8SLogging("-v=9")
 
-	ks := &K8S{}
-	err := ks.init(context.Background())
+	ks, err := New(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +197,7 @@ func TestWatch(t *testing.T) {
 	})
 
 	t.Run("rawwatch", func(t *testing.T) {
-		ctx, cf := context.WithTimeout(context.Background(), 50*time.Second)
+		ctx, cf := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cf()
 
 		url, _, _ := rest.DefaultServerUrlFor(k.RestConfig)
@@ -205,6 +213,9 @@ func TestWatch(t *testing.T) {
 		for {
 			n, err := frameReader.Read(buf)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				t.Fatal(err)
 			}
 			log.Println(string(buf[0:n]))
@@ -246,53 +257,50 @@ func TestWatch(t *testing.T) {
 		log.Println(pl)
 	})
 
-	t.Run("restcached", func(t *testing.T) {
-		ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cf()
-
-		// k8s.io/client-go/kubernetes/scheme is the generated package - by client-gen
-		// starts with runtime.NewScheme(),
-
-		hd := homedir.HomeDir()
-		cache := path.Join(hd, ".kube", "cache")
-		cachedClient, err := disk.NewCachedDiscoveryClientForConfig(k.ConfigFor("/api", "v1", "", nil),
-			path.Join(cache, "discovery"),
-			path.Join(cache, "http"), 1*time.Hour)
-		//cachedClient.Invalidate()
-
-		//rc, err := k.RestClient("/api", "v1", "", scheme.Codecs.WithoutConversion())
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// original client
-		rc := cachedClient.RESTClient() // rest.Interface
-
-		cachedClient.ServerResourcesForGroupVersion("events.k8s.io/v1")
-
-		kr := rc.Get()
-		// namepspace, name
-		kr.Resource("pods")
-		kr.Param("limit", "3")
-		kr.Param("FieldSelector", "metadata.namespace==istio-system,status.phase!=Pending")
-
-		kres := kr.Do(ctx)
-		resb, err := kres.Raw()
-
-		//r, err := http.NewRequestWithContext(ctx, "GET", "https://35.193.24.39/api/v1/pods?fieldSelector=metadata.namespace%3D%3Distio-system%2Cstatus.phase%21%3DPending&labelSelector=tier%21%3Dprod%2C+a%21%3Db&limit=3&timeoutSeconds=3", nil)
-		//res, err := k.httpClient.Do(r)
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		//resb, err := ioutil.ReadAll(res.Body)
-		log.Println(len(resb))
-
-		pl, err := kres.Get()
-		// PodList object, with ListMeta
-		log.Println(pl)
-	})
+	//t.Run("restcached", func(t *testing.T) {
+	//	ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
+	//	defer cf()
+	//
+	//	hd := homedir.HomeDir()
+	//	cache := path.Join(hd, ".kube", "cache")
+	//
+	//	// Using ~/.kube/cache/discovery, holds a groupToServerResources map.
+	//
+	//	cachedClient, err := disk.NewCachedDiscoveryClientForConfig(k.ConfigFor("/api", "v1", "", scheme.Codecs.WithoutConversion()),
+	//		path.Join(cache, "discovery"),
+	//		path.Join(cache, "http"), 1*time.Hour)
+	//
+	//	//cachedClient.Invalidate()
+	//
+	//	// original client
+	//	rc := cachedClient.RESTClient() // rest.Interface
+	//
+	//	//rl, err := cachedClient.ServerResourcesForGroupVersion("pods/v1")
+	//	//log.Println(rl, err)
+	//
+	//	//r, err := http.NewRequestWithContext(ctx, "GET", url.String()+"/api/v1/events?watch=1", nil)
+	//
+	//	kr := rc.Get()
+	//	kr.RequestURI("/api/v1/pods")
+	//	kres := kr.Do(ctx)
+	//	resb, err := kres.Raw()
+	//
+	//	kr = rc.Get()
+	//	kr.RequestURI("/api/v1/pods")
+	//	kres = kr.Do(ctx)
+	//	resb, err = kres.Raw()
+	//
+	//	if err != nil {
+	//		t.Fatal(err)
+	//	}
+	//
+	//	//resb, err := ioutil.ReadAll(res.Body)
+	//	log.Println(len(resb))
+	//
+	//	pl, err := kres.Get()
+	//	// PodList object, with ListMeta
+	//	log.Println(pl)
+	//})
 
 	t.Run("restwatch", func(t *testing.T) {
 		ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
@@ -376,10 +384,9 @@ func TestWatch(t *testing.T) {
 
 // According to https://kubernetes.io/docs/reference/using-api/api-concepts/#watch-bookmarks
 // streaming lists is in 1.27 alpha.
-func TestRawWatch(t *testing.T) {
+func TestSendInitialEvents(t *testing.T) {
 	SetK8SLogging("-v=9")
-	k := &K8S{}
-	err := k.init(context.Background())
+	k, err := New(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +430,7 @@ func TestRawWatch(t *testing.T) {
 	//	Timeout(timeout).
 	//	Watch(context.Background())
 	if err != nil {
-		t.Error(err)
+		t.Skip("sendInitialEventsFeatureGate not enabled")
 	}
 
 	// https://35.193.24.39/api/v1/pod?allowWatchBookmarks=true&sendInitialEvents=true&timeoutSeconds=5&watch=true
