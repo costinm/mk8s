@@ -41,7 +41,9 @@ func TestK8S(t *testing.T) {
 	//	os.Setenv("GCE_METADATA_HOST", "localhost:15014")
 	//}
 
-	gke, err := New(ctx, nil)
+	ma := meshauth.New(nil)
+
+	gke, err := New(ctx, &meshauth.Module{Mesh: ma})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,10 +57,8 @@ func TestK8S(t *testing.T) {
 	// Should be a federated token
 	t.Log("Token", "federated access", access[0:7])
 
-	if gke.MeshCfg.MDS.Project.NumericProjectId == 0 {
 		// Verify resource manager works
-		t.Log("On demand number:", gke.NumericProjectId())
-	}
+		t.Log("On demand number:", gke.NumericProjectIdResourceManager())
 
 	// Can't return JWT tokens signed by google for federated identities, but K8S can.
 	access, err = gke.K8S.Default.GetToken(ctx, "dummy")
@@ -77,7 +77,7 @@ func TestK8S(t *testing.T) {
 	t.Log("Token", "jwt", j.String())
 
 	// GcpInit should also populate project ID.
-	t.Log("Meta", "projectID", gke.MeshCfg.MDS.Project.ProjectId)
+	t.Log("Meta", "projectID", gke.ProjectId())
 
 	// Update the list of clusters.
 	cl, err := gke.LoadGKEClusters(ctx, "", "us-central1")
@@ -121,7 +121,8 @@ func TestK8S(t *testing.T) {
 		p, l, n := testCluster.GcpInfo()
 		meshAddr := fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", p, l, n)
 
-		kr1, err := New(ctx, &meshauth.MeshCfg{MeshAddr: meshAddr})
+		ma := meshauth.New(&meshauth.MeshCfg{MeshAddr: meshAddr})
+		kr1, err := New(ctx, &meshauth.Module{Mesh: ma})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +135,8 @@ func TestK8S(t *testing.T) {
 
 	// A GKE project provided - will list it and pick best cluster.
 	t.Run("explicitGKEFind", func(t *testing.T) {
-		kr1, err := New(ctx, &meshauth.MeshCfg{MeshAddr: "gke://" + gke.ProjectId()})
+		ma := meshauth.New(&meshauth.MeshCfg{MeshAddr: "gke://" + gke.ProjectId()})
+		kr1, err := New(ctx, &meshauth.Module{Mesh: ma})
 		if err != nil {
 			t.Fatal(err)
 		}

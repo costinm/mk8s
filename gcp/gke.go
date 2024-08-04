@@ -17,10 +17,10 @@ package gcp
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -29,9 +29,11 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/costinm/meshauth"
-	"github.com/costinm/meshauth/util"
-	"github.com/costinm/mk8s/k8s"
+	"github.com/costinm/meshauth/pkg/mdsd"
+	k8s "github.com/costinm/mk8s"
 	"github.com/labstack/gommon/random"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/oauth2"
 	crm "google.golang.org/api/cloudresourcemanager/v1"
 
@@ -65,10 +67,10 @@ import (
 type GKE struct {
 	// MDS is equivalent to the recursive result of the metadata server, but
 	// can be part of the config file. Will look in ~/.kube/mds.json for defaults.
-	*meshauth.MeshCfg `json:inline`
+	//*meshauth.MeshCfg `json:inline`
 
 	// Discovered certificates and local identity, metadata.
-	MeshAuth *meshauth.MeshAuth `json:-`
+	Mesh *meshauth.Mesh `json:-`
 
 	// Clusters loaded from kube config, env, etc.
 	// Default should be set after New().
@@ -101,139 +103,255 @@ type GKECluster struct {
 	restConfig *rest.Config
 }
 
+//func (gke *GKE) UpdateK8S(ctx context.Context, k8s *k8s.K8S) error {
+//	// Use K8S as a token source, with the default KSA and exchanging to access tokens
+//	gke.K8S = k8s
+//	gke.authScheme = "gke" + random.String(8)
+//	RegisterK8STokenProvider(gke.authScheme, gke)
+//
+//	return nil
+//}
+
+
+func NewModule(module *meshauth.Module) error {
+	ctx := context.Background()
+
+
+	ma := module.Mesh
+
+	// Bootstrap credentials will also be used to connect to K8S and to get
+	// further credentials and configs.
+	gke, err := New(ctx, module)
+	if err != nil {
+		return err
+	}
+
+	module.Module = gke
+
+	k := gke.K8S
+	//k, err := k8sc.New(ctx, &k8sc.K8SConfig{})
+
+	maCfg := ma.MeshCfg
+
+	startupSpan := trace.SpanFromContext(ctx)
+	if startupSpan.IsRecording() {
+		// Add info about the context to the start span
+		startupSpan.SetAttributes(attribute.Int("k8s_count", len(k.ByName)))
+		if k.Default != nil {
+			startupSpan.SetAttributes(attribute.String("k8s_ctx", k.Default.Name))
+		}
+	}
+
+	ma.AuthProviders["k8s"] = k.Default
+
+	fedS := meshauth.NewFederatedTokenSource(&meshauth.STSAuthConfig{
+		AudienceSource: gke.ProjectId() + ".svc.id.goog",
+		TokenSource:    k,
+	})
+	// Federated access tokens (for ${PROJECT_ID}.svc.id.goog[ns/ksa]
+	// K8S JWT access tokens otherwise.
+	ma.AuthProviders["gcp_fed"] = fedS
+
+	if ma.GSA == "" {
+		// Use default naming conventions
+		ma.GSA = "k8s-" + maCfg.Namespace + "@" + gke.ProjectId() + ".iam.gserviceaccount.com"
+	}
+
+	if ma.GSA != "-" {
+		audTokenS := meshauth.NewFederatedTokenSource(&meshauth.STSAuthConfig{
+			TokenSource:    k,
+			GSA:            ma.GSA,
+			AudienceSource: gke.ProjectId() + ".svc.id.goog",
+		})
+		ma.AuthProviders["gcp"] = audTokenS
+	} else {
+		ma.AuthProviders["gcp"] = fedS
+	}
+
+	// Start an emulated MDS server if address is set and not running on GCP
+	// MDS emulator/redirector listens on localhost by default, as a sidecar or service.
+	//
+	if module.Address != "" {
+		os.Setenv("GCE_METADATA_HOST", "localhost:15021")
+
+		mux := http.NewServeMux()
+		err := mdsd.SetupAgent(module.Mesh, mux)
+		if err != nil {
+			return err
+		}
+		go http.ListenAndServe("localhost:15021", mux)
+	}
+
+	return nil
+
+}
+
+func GCP(m *meshauth.Mesh) *GKE {
+	mm := m.Module("gcp")
+	if mm == nil {
+		return nil
+	}
+	if gke, ok := mm.Module.(*GKE); ok {
+		return gke
+	}
+	return nil
+}
+
 // New will initialize a default K8S cluster - using the environment.
 // It may also load clusters from GKE or HUB, and init metadata and meshauth.
 // Use if running with GKE clusters and need GCP features.
 // The k8s package can also be used with GKE clusters with minimal deps.
-func New(ctx context.Context, meshCfg *meshauth.MeshCfg) (*GKE, error) {
-	if meshCfg == nil {
-		meshCfg = &meshauth.MeshCfg{}
-	}
-	if meshCfg.MDS == nil {
-		meshCfg.MDS = &util.Metadata{}
-	}
+func New(ctx context.Context, mod *meshauth.Module) (*GKE, error) {
+	var err error
+	ma := mod.Mesh
 
 	gke := &GKE{
-		MeshCfg: meshCfg,
+		Mesh: ma,
 	}
-	gke.authScheme = "gke" + random.String(8)
 
-	k8s.RegisterTokenProvider(gke.authScheme, gke)
+	ks := meshauth.ModuleT[k8s.K8S](mod.Mesh, "k8s") // k8s.GetK8S(mod.Mesh)
 
-	// Overrides via env variables
-	gke.defaultsFromEnv(ctx)
-
-	// First attempt to load 'in cluster' and kubeconfig.
-	// May not find any cluster - not an error, Default will not be set.
-	ks, err := k8s.New(ctx, &k8s.K8SConfig{
-		Namespace: meshCfg.Namespace,
-	})
-	if err != nil {
-		return nil, err
-	}
 	gke.K8S = ks
+	mod.Module = gke
 
-	// Load extra metadata from a file - kube config does not have all the GCP info
-	// and it's better to use cached and customized value.
-	kc := os.Getenv("HOME") + "/.kube/mds.json"
-	if _, err := os.Stat(kc); err == nil {
-		kcb, err := os.ReadFile(kc)
-		if err == nil {
-			json.Unmarshal(kcb, gke)
-		}
-	}
-
-	if gke.MeshCfg.MDS == nil {
-		gke.MeshCfg.MDS = &util.Metadata{}
-	}
-
-	// At this point, we have a project ID and default K8S cluster if running on GKE
-	// or on a VM with kube config.
-	// We don't have anything if running on an unconfigured GCP VM or CloudRun.
-
-	if ks.Default == nil || gke.MeshCfg.MDS.Project.ProjectId == "" {
+	// If user set an address to emulate GCP on VM - use it along with
+	// K8S credentials.
+	// Otherwise - expect to run on GCP with a real MDS server.
+	if mod.Address == "" {
+		// If the mesh MDS is not setup - will use metadata server.
+		// Note that the first call to metadata.OnGCE will set a static var -
+		// it can't be changed. If mod.Address is set - we want to set it
+		// with the fake MDS.
 		if os.Getenv("GCE_METADATA_HOST") != "" || metadata.OnGCE() {
 			// TODO: load from real MDS if explicitly set or on GCP.
-			log.Println("No Kubeconfig, incluster - on GCP, using MDS as primary source")
-			gke.defaultsFromMDS(ctx)
-			gke.AccessTokenSource = google.ComputeTokenSource("default")
-			gke.TokenSource = &meshauth.MDS{UseMDSFullToken: true}
+			// Using the 'mesh mds' client instead of metadata - it works off GCP and
+			// may use a local cache.
+			if ks.Default == nil {
+				log.Println("On GCP/Cloudrun, using MDS as primary source")
+				gke.AccessTokenSource = google.ComputeTokenSource("default")
+			} else {
+				log.Println("On GKE - using federated tokens from GKE MDS")
+				gke.AccessTokenSource = google.ComputeTokenSource("default")
+			}
+		} else {
+			if ks.Default != nil {
+				log.Println("Not on GCP, no emulated MDS", ks.Default.Name)
+			} else {
+				log.Println("Not on GCP, no emulated MDS, no K8S")
+			}
 		}
+	} else {
+		// Address is set for the 'emulated' GCP mode.
+		if ks.Default == nil {
+			return nil, errors.New("Missing credentials source")
+		}
+		pid := gke.ProjectId()
+		// In cluster or kube config found a default cluster.
+		// If we have a GSA set for impersonation in the config - use it to get
+		// access tokens.
+		// Use the K8S cluster's defaults.
+		//ks.Default.Namespace = gke.MeshCfg.Namespace
+		//ks.Default.KSA = gke.MeshCfg.Name
+
+		gke.TokenSource = meshauth.NewFederatedTokenSource(&meshauth.STSAuthConfig{
+			TokenSource:    ks.Default,
+			AudienceSource: pid + ".svc.id.goog",
+			// If no GSA set - returns the original federated access token, requires perms
+			GSA: "k8s-default@" + pid + ".iam.gserviceaccount.com",
+		})
+
+		// If a GSA is not set - the access tokens will be federated,
+		// and the JWTs will be signed by the GKE cluster.
+		ma.AuthProviders["gcp"] = gke.TokenSource
+
+		log.Println("Emulated GCP using kubeconfig", ks.Default.Name, mod.Address, ks.Default.Name, pid)
+
 	}
+
 
 	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
 		// Don't load the gcloud adc - can't be used for JWTs.
 		creds, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
 		if err == nil {
 			gke.AccessTokenSource = creds.TokenSource
-			log.Println("Using GAC")
+			log.Println("Using GAC ", creds.ProjectID, creds.JSON)
 		}
 	}
 
-	pid := gke.ProjectId()
+
+	// Allow the K8S SDK to use this as a token source.
+	gke.authScheme = "gke" + random.String(8)
+	RegisterK8STokenProvider(gke.authScheme, gke)
+
+	// Load GKE project clusters and hub
 
 	if ks.Default == nil {
-		err := gke.initGKE(ctx)
+		err = gke.initGKE(ctx)
 		if err != nil {
 			log.Println("Failed to init from GKE", err)
-		}
-	}
-
-	if ks.Default != nil {
-		// In cluster or kube config found a default cluster.
-		// If we have a GSA set for impersonation in the config - use it to get
-		// access tokens.
-		ks.Default.Namespace = gke.MeshCfg.Namespace
-		ks.Default.KSA = gke.MeshCfg.Name
-
-		if gke.TokenSource == nil {
-			gke.TokenSource = meshauth.NewFederatedTokenSource(&meshauth.STSAuthConfig{
-				TokenSource:    ks.Default,
-				AudienceSource: pid + ".svc.id.goog",
-				// If no GSA set - returns the original federated access token, requires perms
-				GSA: "k8s-default@" + pid + ".iam.gserviceaccount.com",
-			})
 		}
 	}
 
 	return gke, nil
 }
 
-// defaultsFromEnv will attempt to configure ProjectId, ClusterName, ClusterLocation, ProjectNumber, used on GCP
-func (gke *GKE) defaultsFromEnv(ctx context.Context) error {
+// initGKE is called if the settings include an explicit cluster selection.
+// or if no default K8S is found - on VMs or CloudRun without a kube config.
+//
+// Logic is:
+// - check the config.MeshAddr or MESH_URL env variables for a URL
+func (gke *GKE) initGKE(ctx context.Context) error {
 
-	if gke.MeshCfg.MDS.Project.ProjectId == "" {
-		gke.MeshCfg.MDS.Project.ProjectId = os.Getenv("PROJECT_ID")
+	// Explicitly set MeshAddr - via env variable or mesh config.
+
+	// Must be a fully qualified URL - project ID is ignored
+	meshAddrURL := gke.Mesh.MeshCfg.MeshAddr
+	if meshAddrURL == "" {
+		meshAddrURL = os.Getenv("MESH_URL")
 	}
 
-	if gke.MeshCfg.MDS.Project.NumericProjectId == 0 {
-		projectNumber := os.Getenv("PROJECT_NUMBER")
-		gke.MeshCfg.MDS.Project.NumericProjectId, _ = strconv.Atoi(projectNumber)
+	findClusterN := "istio"
+
+	// Explicit configuration - use it to load a single cluster.
+	if meshAddrURL != "" {
+		meshAddr, _ := url.Parse(meshAddrURL)
+		if meshAddr.Scheme == "gke" || meshAddr.Host == "container.googleapis.com" {
+			// Shortcut:
+			// gke:///....costin-asm1/us-central1-c/istio
+
+			// Not using the hub resourceLink format:
+			//    container.googleapis.com/projects/wlhe-cr/locations/us-central1-c/clusters/asm-cr
+			// 'selfLink' from GKE list API:
+			// "https://container.googleapis.com/v1/projects/wlhe-cr/locations/us-west1/clusters/istio"
+
+			if len(meshAddr.Path) > 1 {
+				// Explicit override - user specified the full path to the cluster.
+				// ~400 ms
+				cl, err := gke.GKECluster(ctx, meshAddr.Path)
+				if err != nil {
+					log.Println("Failed in NewForConfig", gke, err)
+					return err
+				}
+				gke.K8S.Default = cl
+				log.Println("GKE init with explicit config", meshAddrURL)
+				return nil
+			}
+		}
+
+		if meshAddr.Scheme == "hub" { // TODO
+
+		}
+		if meshAddr.Scheme == "cluster" { // TODO
+			findClusterN = meshAddr.Host
+		}
 	}
 
-	if gke.MeshCfg.Namespace == "" {
-		// Legacy setting - also used by kubectl
-		gke.MeshCfg.Namespace = os.Getenv("POD_NAMESPACE")
-	}
-
-	return nil
+	return gke.autodetect(ctx, findClusterN)
 }
 
-func (gke *GKE) defaultsFromMDS(ctx context.Context) error {
-	// TODO: recursive and cache
-	if gke.MeshCfg.MDS.Project.ProjectId == "" {
-		gke.MeshCfg.MDS.Project.ProjectId, _ = metadata.ProjectID()
-	}
-
-	return nil
-}
 
 func (gke *GKE) ProjectId() string {
-	if gke.MeshCfg.MDS.Project.ProjectId == "" {
-		gke.MeshCfg.MDS.Project.ProjectId, _ = metadata.ProjectID()
-	}
-
-	return gke.MeshCfg.MDS.Project.ProjectId
+	return mdsd.Get(gke.Mesh).ProjectID()
 }
 
 func RegionFromMetadata() (string, error) {
@@ -248,6 +366,7 @@ func RegionFromMetadata() (string, error) {
 	return vs[1], nil
 }
 
+// GetToken is used by the K8S library to get access tokens for the cluster.
 func (gcp *GKE) GetToken(ctx context.Context, aud string) (string, error) {
 	if aud != "" && gcp.TokenSource != nil {
 		return gcp.TokenSource.GetToken(ctx, aud)
@@ -323,22 +442,26 @@ func (gcp *GKE) Token() (*oauth2.Token, error) {
 
 // Required for using hub, TD and other GCP APIs.
 // Should be part of the config, env - or loaded on demand from MDS or resource manager.
-func (gcp *GKE) NumericProjectId() int {
-	if gcp.MeshCfg.MDS.Project.NumericProjectId == 0 {
-		projectNumber, err := metadata.NumericProjectID()
-		if err == nil {
-			gcp.MeshCfg.MDS.Project.NumericProjectId, _ = strconv.Atoi(projectNumber)
-		}
+func (gcp *GKE) NumericProjectId() string {
+	n := mdsd.Get(gcp.Mesh).NumericProjectID()
+	if n != "" {
+		return n
 	}
+	return gcp.NumericProjectIdResourceManager()
+}
+
+func (gcp *GKE) NumericProjectIdResourceManager() string {
+
+	log.Println("Last resort getting project number - consider saving to mesh-env in K8S or caching. Low QPS allowed")
 
 	pdata := gcp.ProjectData()
 	if pdata == nil {
-		return 0
+		return ""
 	}
 
-	gcp.MeshCfg.MDS.Project.NumericProjectId = int(pdata.ProjectNumber)
+	return strconv.Itoa(int(pdata.ProjectNumber))
 	// This is in v1 - v3 has it encoded in name.
-	return gcp.MeshCfg.MDS.Project.NumericProjectId
+	// return gcp.MeshCfg.MDS.Project.NumericProjectId
 }
 
 // ProjectData will fetch the project number and other info from CRM.
@@ -353,7 +476,11 @@ func (gcp *GKE) ProjectData() *crm.Project {
 	if err != nil {
 		return nil
 	}
-	pdata, err := cr.Projects.Get(gcp.MeshCfg.MDS.Project.ProjectId).Do()
+	pid := gcp.ProjectId()
+	if pid == "" {
+		return nil
+	}
+	pdata, err := cr.Projects.Get(pid).Do()
 	if err != nil {
 		return nil
 	}
@@ -362,59 +489,6 @@ func (gcp *GKE) ProjectData() *crm.Project {
 	return pdata
 }
 
-// initGKE is called if the settings include an explicit cluster selection.
-// or if no default K8S is found - on VMs or CloudRun without a kube config.
-//
-// Logic is:
-// - check the config.MeshAddr or MESH_URL env variables for a URL
-func (gke *GKE) initGKE(ctx context.Context) error {
-
-	// Explicitly set MeshAddr - via env variable or mesh config.
-
-	// Must be a fully qualified URL - project ID is ignored
-	meshAddrURL := gke.MeshCfg.MeshAddr
-	if meshAddrURL == "" {
-		meshAddrURL = os.Getenv("MESH_URL")
-	}
-
-	findClusterN := "istio"
-
-	// Explicit configuration - use it to load a single cluster.
-	if meshAddrURL != "" {
-		meshAddr, _ := url.Parse(meshAddrURL)
-		if meshAddr.Scheme == "gke" || meshAddr.Host == "container.googleapis.com" {
-			// Shortcut:
-			// gke:///....costin-asm1/us-central1-c/istio
-
-			// Not using the hub resourceLink format:
-			//    container.googleapis.com/projects/wlhe-cr/locations/us-central1-c/clusters/asm-cr
-			// 'selfLink' from GKE list API:
-			// "https://container.googleapis.com/v1/projects/wlhe-cr/locations/us-west1/clusters/istio"
-
-			if len(meshAddr.Path) > 1 {
-				// Explicit override - user specified the full path to the cluster.
-				// ~400 ms
-				cl, err := gke.GKECluster(ctx, meshAddr.Path)
-				if err != nil {
-					log.Println("Failed in NewForConfig", gke, err)
-					return err
-				}
-				gke.K8S.Default = cl
-				log.Println("GKE init with explicit config", meshAddrURL)
-				return nil
-			}
-		}
-
-		if meshAddr.Scheme == "hub" { // TODO
-
-		}
-		if meshAddr.Scheme == "cluster" { // TODO
-			findClusterN = meshAddr.Host
-		}
-	}
-
-	return gke.autodetect(ctx, findClusterN)
-}
 
 // GKECluster returns a GKE cluster by getting the config from ClusterManager
 // It is used when a K8S cluster is explicitly configured.
@@ -436,9 +510,9 @@ func (gke *GKE) GKECluster(ctx context.Context, p string) (*k8s.K8SCluster, erro
 		if e == nil {
 
 			rc := &k8s.K8SCluster{
-				Config:    gke.loadRestsConfig(c),
-				RawConfig: c,
-				Name:      "gke_" + p + "_" + c.Location + "_" + c.Name,
+				RestConfig: gke.loadRestsConfig(c),
+				RawConfig:  c,
+				Name:       "gke_" + p + "_" + c.Location + "_" + c.Name,
 			}
 
 			return rc, nil
@@ -524,12 +598,12 @@ func (gke *GKE) LoadHubClusters(ctx context.Context, configProjectId string) ([]
 		mn := mna[len(mna)-1]
 
 		ctxName := "connectgateway_" + gke.ProjectId() + "_global_" + mn
-		curl := fmt.Sprintf("/v1/projects/%d/locations/global/gkeMemberships/%s", gke.NumericProjectId(), mn)
+		curl := fmt.Sprintf("/v1/projects/%s/locations/global/gkeMemberships/%s", gke.NumericProjectId(), mn)
 
 		gk := &k8s.K8SCluster{
 			Name: ctxName,
 			// Connecting via HUB
-			Config: gke.hubConfig(curl, ctxName),
+			RestConfig: gke.hubConfig(curl, ctxName),
 		}
 
 		cl = append(cl, gk)
@@ -568,6 +642,7 @@ func (gke *GKE) options(configProjectId string) []option.ClientOption {
 // Updates the list of clusters in the specified GKE project.
 //
 // Requires container.clusters.list
+// This will use the emulated token source.
 func (gke *GKE) LoadGKEClusters(ctx context.Context, configProjectId string, location string) ([]*k8s.K8SCluster, error) {
 
 	opts := gke.options(configProjectId)
@@ -599,11 +674,11 @@ func (gke *GKE) LoadGKEClusters(ctx context.Context, configProjectId string, loc
 		c := c
 
 		gkk := &k8s.K8SCluster{
-			Name:   "gke_" + configProjectId + "_" + c.Location + "_" + c.Name,
-			Config: gke.loadRestsConfig(c),
+			Name:       "gke_" + configProjectId + "_" + c.Location + "_" + c.Name,
+			RestConfig: gke.loadRestsConfig(c),
 
 			// Namespace and KSA are set from the defaults.
-			Namespace: gke.MeshCfg.Namespace,
+			Namespace: gke.Mesh.MeshCfg.Namespace,
 			// KSA: gke.MeshCfg.Name,
 		}
 		gkk.RawConfig = c

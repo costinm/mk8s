@@ -8,27 +8,34 @@ import (
 	"github.com/costinm/meshauth"
 )
 
-func Dump(ctx context.Context, gke *GKE) {
+// DumpGKE is a module that dumps the GKE clusters and info
+func DumpGKE(m *meshauth.Module) error {
+
+	gke := GCP(m.Mesh)
+
+	ctx := context.Background()
 
 	fromK8S := false
+
 	if gke.K8S.Default != nil {
 		log.Println("Found meshconfig/default clusters", gke.K8S.Default.Name, len(gke.K8S.ByName))
 		fromK8S = true
 	}
+
 
 	k8s := gke.K8S
 
 	// Explicitly load all clusters (gke.New() selectively loads based on env)
 	cl, err := gke.LoadGKEClusters(ctx, "", "")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	log.Println("Found GKE clusters", len(cl))
 
 	// Explicitly load all hub clusters
 	cl2, err := gke.LoadHubClusters(ctx, "")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	log.Println("Found HUB clusters", len(cl2))
 
@@ -36,21 +43,23 @@ func Dump(ctx context.Context, gke *GKE) {
 		log.Println("Default from GKE clusters", gke.K8S.Default, len(gke.K8S.ByName))
 	}
 
-	// Can't return JWT tokens signed by google for federated identities, but K8S can.
-	access, err := gke.K8S.Default.GetToken(ctx, "istio-ca")
-	if err != nil {
-		log.Println("Failed to get K8S token", err)
-	} else {
-		j := meshauth.DecodeJWT(access)
-		log.Println("K8S Default Token", "k8s", j.String())
-
-	}
+	gke.autodetect(ctx, "")
 
 	istio_ca, err := gke.GetToken(ctx, "istio_ca")
 	if err != nil {
 		log.Println("Failed to get GCP token", err)
 	} else {
 		j := meshauth.DecodeJWT(istio_ca)
+		log.Println("K8S Default Token", "k8s", j.String())
+	}
+
+
+	// Can't return JWT tokens signed by google for federated identities, but K8S can.
+	access, err := gke.K8S.Default.GetToken(ctx, "istio-ca")
+	if err != nil {
+		log.Println("Failed to get K8S token", err)
+	} else {
+		j := meshauth.DecodeJWT(access)
 		log.Println("K8S Default Token", "k8s", j.String())
 
 	}
@@ -86,4 +95,6 @@ func Dump(ctx context.Context, gke *GKE) {
 	for range k8s.ByName {
 		<-ch
 	}
+
+	return err
 }

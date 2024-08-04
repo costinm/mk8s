@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+tls.crt
+tls.key
+
 # Test binary, built with `go test -c`
 *.test
 

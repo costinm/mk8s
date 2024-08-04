@@ -5,7 +5,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/costinm/mk8s/k8s"
+	k8s "github.com/costinm/mk8s"
 )
 
 // If not cluster is explicitly set, try to autodetect a cluster in GKE or HUB
@@ -25,17 +25,20 @@ func (gke *GKE) autodetect(ctx context.Context, findClusterN string) error {
 	// ~500ms
 	//label := "mesh_id"
 	// Try to get the region from metadata server. For Cloudrun, this is not the same with the cluster - it may be zonal
-	myRegion, _ := RegionFromMetadata()
 
-	cl := gke.FindCluster(myRegion, findClusterN)
-
-	if cl != nil {
-		log.Println("Found default cluster", cl.Name)
-	}
 
 	// TODO: connect to cluster, find istiod - and keep trying until a working one is found ( fallback )
 
-	gke.K8S.Default = cl
+	if gke.K8S.Default == nil {
+		myRegion, _ := RegionFromMetadata()
+		cl := gke.FindCluster(myRegion, findClusterN)
+
+		if cl != nil {
+			log.Println("Found default cluster", cl.Name)
+		}
+
+		gke.K8S.Default = cl
+	}
 	return nil
 }
 
