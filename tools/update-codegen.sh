@@ -78,7 +78,7 @@ install() {
   go install sigs.k8s.io/controller-tools/cmd/type-scaffold
   go install k8s.io/code-generator/cmd/register-gen
 
-  go install sigs.k8s.io/apiserver-builder-alpha/cmd/apiserver-boot@v1.23.0
+  #go install sigs.k8s.io/apiserver-builder-alpha/cmd/apiserver-boot@v1.23.0
 
 }
 
@@ -99,6 +99,7 @@ client() {
     --input $P/v1 \
      --output-pkg ${GITPKG}/${P}
 }
+
 listers() {
     local P=$1
 
@@ -144,8 +145,8 @@ codegen() {
 
   register-gen  ./$P/v1
 
-  controller-gen +object \
-                      paths=./$P/v1
+  #controller-gen +object \
+  #                    paths=./$P/v1
 
   # Default: ./config/crd/...
   controller-gen +crd \
@@ -157,9 +158,11 @@ all() {
   local P=$1
 
   client $P
+
   listers $P
   informers $P
   openapi $P
+
   codegen $P
 }
 

@@ -30,6 +30,7 @@ import (
 	"cloud.google.com/go/compute/metadata"
 	"github.com/costinm/meshauth"
 	"github.com/costinm/meshauth/pkg/mdsd"
+	"github.com/costinm/meshauth/pkg/stsd"
 	k8s "github.com/costinm/mk8s"
 	"github.com/labstack/gommon/random"
 	"go.opentelemetry.io/otel/attribute"
@@ -55,19 +56,9 @@ import (
 	kubeconfig "k8s.io/client-go/tools/clientcmd/api"
 )
 
-// Integration with GCP - use metadata server or GCP-specific env variables to auto-configure connection to a
-// GKE cluster and extract metadata.
-
-// Using the metadata package, which connects to 169.254.169.254, metadata.google.internal or $GCE_METADATA_HOST (http, no prefix)
-// Will attempt to guess if running on GCP if env variable is not set.
+// GKE module will discover clusters using GKE or Hub APIs.
 //
-//Note that requests are using a 2 sec timeout.
-
-// TODO:  finish hub.
 type GKE struct {
-	// MDS is equivalent to the recursive result of the metadata server, but
-	// can be part of the config file. Will look in ~/.kube/mds.json for defaults.
-	//*meshauth.MeshCfg `json:inline`
 
 	// Discovered certificates and local identity, metadata.
 	Mesh *meshauth.Mesh `json:-`
@@ -77,19 +68,29 @@ type GKE struct {
 	K8S *k8s.K8S `json:-`
 
 	// Returns access tokens for a user or service account (via MDS or  default credentials) or federated access tokens (GKE without a paired GSA).
-	AccessTokenSource oauth2.TokenSource
+	AccessTokenSource oauth2.TokenSource `json:-`
 
 	// Raw token source - can be the default K8S cluster.
-	TokenSource meshauth.TokenSource
+	TokenSource meshauth.TokenSource `json:-`
 
 	// Cached project info from CRM- loaded on demand if MDS or env or config are missing
 	// to find project number. Still requires ProjectId
-	projectData *crm.Project
+	projectData *crm.Project `json:-`
 
-	authScheme string
+	authScheme string `json:-`
+
+
+	Location string
+	ProjectID string
+	HubProjectID string
 }
 
-// GKECluster wraps cluster information for a discovered hub or gke cluster.
+func NewGKE(ctx context.Context, ns, name string) *GKE {
+	return &GKE{}
+}
+
+// GKECluster wraps cluster information for a discovered gke cluster.
+// This implements the basic K8S interface to get a rest.Config.
 type GKECluster struct {
 	// mangled name
 	FullName string
@@ -103,16 +104,12 @@ type GKECluster struct {
 	restConfig *rest.Config
 }
 
-//func (gke *GKE) UpdateK8S(ctx context.Context, k8s *k8s.K8S) error {
-//	// Use K8S as a token source, with the default KSA and exchanging to access tokens
-//	gke.K8S = k8s
-//	gke.authScheme = "gke" + random.String(8)
-//	RegisterK8STokenProvider(gke.authScheme, gke)
-//
-//	return nil
-//}
+func GKEClusterMod(ns, name string) *GKECluster {
+	return &GKECluster{}
+}
 
 
+// NewModule is a meshauth registration module.
 func NewModule(module *meshauth.Module) error {
 	ctx := context.Background()
 
@@ -129,8 +126,6 @@ func NewModule(module *meshauth.Module) error {
 	module.Module = gke
 
 	k := gke.K8S
-	//k, err := k8sc.New(ctx, &k8sc.K8SConfig{})
-
 	maCfg := ma.MeshCfg
 
 	startupSpan := trace.SpanFromContext(ctx)
@@ -144,7 +139,7 @@ func NewModule(module *meshauth.Module) error {
 
 	ma.AuthProviders["k8s"] = k.Default
 
-	fedS := meshauth.NewFederatedTokenSource(&meshauth.STSAuthConfig{
+	fedS := stsd.NewFederatedTokenSource(&stsd.STSAuthConfig{
 		AudienceSource: gke.ProjectId() + ".svc.id.goog",
 		TokenSource:    k,
 	})
@@ -158,7 +153,7 @@ func NewModule(module *meshauth.Module) error {
 	}
 
 	if ma.GSA != "-" {
-		audTokenS := meshauth.NewFederatedTokenSource(&meshauth.STSAuthConfig{
+		audTokenS := stsd.NewFederatedTokenSource(&stsd.STSAuthConfig{
 			TokenSource:    k,
 			GSA:            ma.GSA,
 			AudienceSource: gke.ProjectId() + ".svc.id.goog",
@@ -182,18 +177,6 @@ func NewModule(module *meshauth.Module) error {
 		go http.ListenAndServe("localhost:15021", mux)
 	}
 
-	return nil
-
-}
-
-func GCP(m *meshauth.Mesh) *GKE {
-	mm := m.Module("gcp")
-	if mm == nil {
-		return nil
-	}
-	if gke, ok := mm.Module.(*GKE); ok {
-		return gke
-	}
 	return nil
 }
 
@@ -253,7 +236,7 @@ func New(ctx context.Context, mod *meshauth.Module) (*GKE, error) {
 		//ks.Default.Namespace = gke.MeshCfg.Namespace
 		//ks.Default.KSA = gke.MeshCfg.Name
 
-		gke.TokenSource = meshauth.NewFederatedTokenSource(&meshauth.STSAuthConfig{
+		gke.TokenSource = stsd.NewFederatedTokenSource(&stsd.STSAuthConfig{
 			TokenSource:    ks.Default,
 			AudienceSource: pid + ".svc.id.goog",
 			// If no GSA set - returns the original federated access token, requires perms
@@ -346,7 +329,7 @@ func (gke *GKE) initGKE(ctx context.Context) error {
 		}
 	}
 
-	return gke.autodetect(ctx, findClusterN)
+	return gke.Autodetect(ctx, findClusterN)
 }
 
 
@@ -707,41 +690,3 @@ func (gke *GKE) loadRestsConfig(c *containerpb.Cluster) *rest.Config {
 	return restConfig
 }
 
-// Converts a GKE GKECluster to k8s config
-// This doesn't work anymore - gcp is no longer compiled.
-// Better to use rest.Config directly and skip kube config
-//func addClusterConfig(c *containerpb.Cluster, p, l, clusterName string) *rest.Config {
-//	kc := kubeconfig.NewConfig()
-//
-//	caCert, err := base64.StdEncoding.DecodeString(c.MasterAuth.ClusterCaCertificate)
-//	if err != nil {
-//		caCert = nil
-//	}
-//
-//	ctxName := "gke_" + p + "_" + l + "_" + clusterName
-//
-//	// We need a KUBECONFIG - tools/clientcmd/api/Config object
-//	kc.CurrentContext = ctxName
-//	kc.Contexts[ctxName] = &kubeconfig.Context{
-//		Cluster:  ctxName,
-//		AuthInfo: ctxName,
-//	}
-//	kc.Clusters[ctxName] = &kubeconfig.Cluster{
-//		Server:                   "https://" + c.Endpoint,
-//		CertificateAuthorityData: caCert,
-//	}
-//	kc.AuthInfos[ctxName] = &kubeconfig.AuthInfo{
-//		AuthProvider: &kubeconfig.AuthProviderConfig{
-//			Name: "mds",
-//		},
-//	}
-//	kc.CurrentContext = ctxName
-//
-//	rc, _ := restConfig(kc)
-//	return rc
-//}
-
-//func restConfig(kc *kubeconfig.Config) (*rest.Config, error) {
-//	// TODO: set default if not set ?
-//	return clientcmd.NewNonInteractiveClientConfig(*kc, "", &clientcmd.ConfigOverrides{}, nil).ClientConfig()
-//}

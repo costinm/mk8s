@@ -17,18 +17,20 @@ package gcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/golang/protobuf/ptypes/duration"
 	"google.golang.org/api/monitoring/v3"
 
 	//"google.golang.org/api/monitoring/v1"
-	//monitoring "google.golang.org/genproto/googleapis/monitoring/v3"
+	//monitoringproto "google.golang.org/genproto/googleapis/monitoring/v3"
 
 	"cloud.google.com/go/logging"
 
@@ -328,6 +330,13 @@ func NewStackdriver(projectID string) (*Stackdriver, error) {
 		return nil, fmt.Errorf("failed to get monitoring service: %v", err)
 	}
 
+	if projectID == "" {
+		projectID = os.Getenv("PROJECT_ID")
+	}
+	if projectID == "" {
+		return nil, errors.New("PROJECT_ID must be set")
+	}
+
 	// Creates a client.
 	lclient, err := logging.NewClient(ctx, projectID)
 	if err != nil {
@@ -537,8 +546,12 @@ func (s *Stackdriver) Close() {
 	_ = s.Logging.Close()
 }
 
+// Creates or add values to a list of values.
+//
+// The key is the metricName and the resource
+//
 // metricName: full, like istio.io/service/server/request_count
-func (s *Stackdriver) CreateTimeSeries(ctx context.Context, resourceType, metricName string, val float64) error {
+func (s *Stackdriver) CreateOrAddVal(ctx context.Context, resource, metricName string, val float64) error {
 
 	// Prepares an individual data point
 	// For 'gauge' - start is optional
@@ -567,10 +580,13 @@ func (s *Stackdriver) CreateTimeSeries(ctx context.Context, resourceType, metric
 			{
 				Metric: &metricpb.Metric{
 					Type: metricName,
-					Labels: map[string]string{
-						"store_id": "Pittsburg",
-					},
+					//Labels: map[string]string{
+					//	"store_id": "Pittsburg",
+					//},
 				},
+				// For each type there is a set of required labels.
+				// global -> project_id
+				// gce_instance -> project_id, instance_id, zone
 				Resource: &monitoredrespb.MonitoredResource{
 					Type: "global",
 					Labels: map[string]string{
@@ -621,40 +637,129 @@ func (s *Stackdriver) ListResources(ctx context.Context, namespace, metricName, 
 	return resp.TimeSeries, nil
 }
 
-type SDListReq struct {
-	ProjectID string
+
+func MetricUpdate(ctx context.Context, r *MetricListRequest) error  {
+	sd, err := NewStackdriver(r.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer sd.Close()
+
+
+	err = sd.CreateOrAddVal(ctx, r.Res, r.Name, r.Val)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+type MetricListRequest struct {
+	ProjectID string `json:"project",foo:"bar"`
+	Name      string
+	Filter    string
+	Verbose   bool
 
 	Namespace string
 
-	// Example: istio.io/service/client/request_count
-	Metric    string
+	// Name of the resource to create
+	Res string
 
-	ExtraQuery string
+	Watch   bool
+	Extra   string
 
-	// Ex: istio_canonical_service
-	ResourceType string
+	Active bool
+
+	Val    float64
 
 	Json               bool
-	// Include metrics with zero value
-	IncludeZeroMetrics bool
 }
 
-func SDList(r SDListReq) {
+// Metrics tool CLI. Can:
+// - list metrics (top level, equivalent to logName or a database or 'file').
+// - add metrics
+// - query
+//
+// First param must be metric:[NAME] or log:[NAME]
+// Args determine what to do.
+// TODO: Stdin can be used for injecting data.
+func LogList(ctx context.Context, r *MetricListRequest) error {
+	var err error
+	var sd *Stackdriver
+	sd, err = NewStackdriver(r.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer sd.Close()
+
+	if r.Watch {
+		if r.Name != "" {
+			if r.Filter != "" {
+				r.Filter = r.Filter + " and "
+			}
+			r.Filter = fmt.Sprintf("log_name:\"projects/%s/logs/%s\"", sd.projectID, r.Name)
+		}
+		err := sd.LogTail(ctx, r.Filter, func(le []*loggingpb.LogEntry) {
+			for _, lle := range le {
+				fmt.Println(lle)
+				fmt.Println()
+			}
+		})
+		if err != nil {
+			return err
+		}
+		select {}
+		return nil
+	}
+
+	if r.Name == "" {
+			// List
+			ll, err := sd.LogList(ctx)
+			if err != nil {
+				log.Fatal(err)
+			}
+			for _, v := range ll {
+				fmt.Println(v)
+			}
+			return nil
+	}
+
+		// List logs given a logName
+		l := r.Name
+		le, err := sd.Logs(ctx, l)
+		if err != nil {
+			log.Panic(err)
+		}
+		for _, v := range le {
+			fmt.Println(v)
+			fmt.Println()
+		}
+		return nil
+
+
+	return nil
+}
+
+func (r *MetricListRequest) Run(ctx context.Context) error {
+	return r.ListResources(ctx)
+}
+
+func (r *MetricListRequest) ListResources(ctx context.Context) error {
 
 	sd, err := NewStackdriver(r.ProjectID)
 	if err != nil {
 		panic(err)
 	}
 
-	rs, err := sd.ListResources(context.Background(),
+	rs, err := sd.ListResources(ctx,
 		r.Namespace,
-		r.Metric, r.ExtraQuery)
+		r.Name, r.Extra)
 
 	log.Println(rs, err)
+
 	// Verify client side metrics (in pod) reflect the CloudrRun server properties
 	ts, err := sd.ListTimeSeries(context.Background(),
-		r.Namespace, r.ResourceType,
-		r.Metric, r.ExtraQuery, time.Now().Add(-1 * time.Hour), time.Now())
+		r.Namespace, r.Res,
+		r.Name, r.Extra, time.Now().Add(-1 * time.Hour), time.Now())
 
 	//" AND metrics.labels.source_canonical_service_name = \"fortio\"" +
 	//		" AND metrics.labels.response_code = \"200\"")
@@ -664,7 +769,7 @@ func SDList(r SDListReq) {
 
 	for _, tsr := range ts {
 		v := tsr.Points[0].Value
-		if !r.IncludeZeroMetrics && *v.DoubleValue == 0 {
+		if r.Active && *v.DoubleValue == 0 {
 			continue
 		}
 		if r.Json {
@@ -674,4 +779,84 @@ func SDList(r SDListReq) {
 			fmt.Printf("%v %v\n", *v.DoubleValue, tsr.Metric.Labels)
 		}
 	}
+
+	return nil
 }
+
+func MetricList(ctx context.Context, r *MetricListRequest) error {
+	var err error
+	var sd *Stackdriver
+	sd, err = NewStackdriver(r.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer sd.Close()
+
+		if r.Name == "" {
+			ml, err := sd.ListMetrics(ctx)
+			if err != nil {
+				log.Panic(err)
+			}
+			for _, v := range ml {
+				if r.Verbose {
+					vb, _ := v.MarshalJSON()
+					fmt.Println(string(vb))
+				} else {
+					// Name is projects/PROJECT_ID/metricDescriptor/TYPE/DISPLAY_NAME
+					// MetricReader query flattens it.
+					l := []string{}
+					for _, vv := range v.Labels {
+						l = append(l, vv.Key)
+					}
+
+					tsl, err := sd.ListTimeSeries(ctx, "", "", v.Type, "", time.Now().Add(-6*time.Hour), time.Now())
+					if err != nil && len(tsl) > 0  {
+						fmt.Println(v.Type, len(tsl), v.MetricKind, v.ValueType, l)
+					}
+				}
+			}
+			return nil
+		}
+
+		m := r.Name
+		timeSeries, err := sd.ListTimeSeries(ctx, "", "", m, r.Extra, time.Now().Add(-6*time.Hour), time.Now())
+		//timeSeries, err := listTS(ctx, startTime, endTime, *metric)
+		if err != nil {
+			log.Panic(err)
+		}
+		fmt.Printf("metrics: #%d\n", len(timeSeries))
+		for _, timeSery := range timeSeries {
+			fmt.Println("  - kind: " + timeSery.MetricKind + " # " + timeSery.ValueType)
+			fmt.Println("    name: " + timeSery.Metric.Type)
+			if r.Verbose {
+				r, _ := timeSery.Resource.MarshalJSON()
+				fmt.Println(string(r))
+				r, _ = timeSery.Metric.MarshalJSON()
+				fmt.Println(string(r))
+				for _, p := range timeSery.Points {
+					r, _ := p.MarshalJSON()
+					fmt.Println(string(r))
+				}
+				fmt.Println("---")
+			} else {
+				fmt.Println("    res: " + timeSery.Resource.Type)
+				fmt.Println("    resLabels:")
+				for k, v := range timeSery.Resource.Labels {
+					fmt.Println("      " + k + ": " + v)
+				}
+				fmt.Printf("    labels: #%d\n", len(timeSery.Metric.Labels))
+				for k, v := range timeSery.Metric.Labels {
+					fmt.Println("      " + k + ": " + v)
+				}
+				fmt.Printf("    points: #%d\n", len(timeSery.Points))
+				for _, p := range timeSery.Points {
+					fmt.Printf("      - %.2f\n", *p.Value.DoubleValue)
+				}
+			}
+			fmt.Println("---")
+		}
+
+
+	return nil
+}
+

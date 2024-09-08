@@ -29,6 +29,7 @@ func TestSD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx := context.Background()
 
 	txt := "TEST_PROPAGATION " + time.Now().String()

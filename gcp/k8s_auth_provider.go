@@ -13,7 +13,8 @@ import (
 
 // Plugin for K8S client to authenticate with a GCP or equivalent metadata server.
 // The provider was removed from the tree, alternative is an exec plugin to include
-// in all docker images.
+// in all docker images. However the SDK does allow registering a programmatic login, and it is useful
+// when connecting to K8S with a programmatically loaded cluster.
 
 // Register an oauth2 token source. This takes a dep on the oauth2 library, but
 // client already depends on it.

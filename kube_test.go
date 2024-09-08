@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/flowcontrol"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,7 +50,7 @@ func TestModes(t *testing.T) {
 
 	k := ks.Default
 
-	rc, err := k.RestClient("/api", "v1", "", scheme.Codecs.WithoutConversion())
+	rc, err := k.RestClient("", "v1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +168,54 @@ func TestModes(t *testing.T) {
 
 }
 
+// Normally implemented by client.RESTClient - this is the interface that can be used when creating clientset.New() clients.
+// Incorporates base and options and a configured HttpClient.
+//
+// rest.HTTPClientFor(config) is configuring the http client for NewForConfig, with timeout, transport - NewForConfigAndClient is using a custom one.
+type FakeRest struct {}
+
+func (f FakeRest) GetRateLimiter() flowcontrol.RateLimiter {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (f FakeRest) Verb(verb string) *rest.Request {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (f FakeRest) Post() *rest.Request {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (f FakeRest) Put() *rest.Request {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (f FakeRest) Patch(pt types.PatchType) *rest.Request {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (f FakeRest) Get() *rest.Request {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (f FakeRest) Delete() *rest.Request {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (f FakeRest) APIVersion() schema.GroupVersion {
+	//TODO implement me
+	panic("implement me")
+}
+
+var _ rest.Interface = &FakeRest{}
+
 // Direct watch using the client.
 func TestWatch(t *testing.T) {
 	SetK8SLogging("-v=9")
@@ -231,30 +280,74 @@ func TestWatch(t *testing.T) {
 		// k8s.io/client-go/kubernetes/scheme is the generated package - by client-gen
 		// starts with runtime.NewScheme(),
 
-		rc, err := k.RestClient("/api", "v1", "", scheme.Codecs.WithoutConversion())
+		rc, err := k.RestClient("", "v1")
 		if err != nil {
 			t.Fatal(err)
 		}
 		kr := rc.Get()
 		// namepspace, name
 		kr.Resource("pods")
+
+		// Request changes to /api/v1/namespaces/istio-system/pods?FieldSelector=...
+		// Without: /api/v1/pods
+		//kr.Namespace("istio-system")
 		kr.Param("limit", "3")
-		kr.Param("FieldSelector", "metadata.namespace==istio-system,status.phase!=Pending")
+		// metadata.namespace==istio-system
+		kr.Param("FieldSelector", "status.phase!=Pending")
 
 		kres := kr.Do(ctx)
-		resb, err := kres.Raw()
+
+		// Typical headers:
+		// Audit-Id: ...
+
+		// List response has the resourceVersion, continue
+		// and remainingItemCount
 
 		//r, err := http.NewRequestWithContext(ctx, "GET", "https://35.193.24.39/api/v1/pods?fieldSelector=metadata.namespace%3D%3Distio-system%2Cstatus.phase%21%3DPending&labelSelector=tier%21%3Dprod%2C+a%21%3Db&limit=3&timeoutSeconds=3", nil)
 		//res, err := k.httpClient.Do(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		//resb, err := ioutil.ReadAll(res.Body)
-		log.Println(len(resb))
+		//resb, err := kres.Raw() // Raw json response - no transformation
+		//if err != nil {
+		//	t.Fatal(err)
+		//}
+		////resb, err := ioutil.ReadAll(res.Body)
+		//log.Println(len(resb))
 
+		// Works if the generated config is registered. The 'raw' just return json
+		// that can be unmarshalled on any struct.
 		pl, err := kres.Get()
 		// PodList object, with ListMeta
 		log.Println(pl)
+	})
+
+	t.Run("rest-istio", func(t *testing.T) {
+		ctx, cf := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cf()
+
+		// k8s.io/client-go/kubernetes/scheme is the generated package - by client-gen
+		// starts with runtime.NewScheme(),
+
+		rc, err := k.RestClient("networking.istio.io", "v1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		kr := rc.Get()
+		// namepspace, name
+		kr.Resource("serviceentries")
+
+		// Request changes to /apis/networking.istio.io/v1/namespaces/istio-system/serviceentries?FieldSelector=...
+		// Without: /apis/networking.istio.io/v1/serviceentries
+		//kr.Namespace("ambient-l4")
+		kr.Param("limit", "3")
+		// metadata.namespace==istio-system
+		//kr.Param("FieldSelector", "status.phase!=Pending")
+
+		kres := kr.Do(ctx)
+		resb, err := kres.Raw() // Raw json response - no transformation
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		log.Println(len(resb))
 	})
 
 	//t.Run("restcached", func(t *testing.T) {
@@ -309,7 +402,7 @@ func TestWatch(t *testing.T) {
 		// k8s.io/client-go/kubernetes/scheme is the generated package - by client-gen
 		// starts with runtime.NewScheme(),
 
-		rc, err := k.RestClient("/api", "v1", "", scheme.Codecs.WithoutConversion())
+		rc, err := k.RestClient( "", "v1")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/costinm/meshauth"
-	k8sc "github.com/costinm/mk8s/k8s"
+	k8sc "github.com/costinm/mk8s"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )

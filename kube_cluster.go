@@ -2,19 +2,21 @@ package mk8s
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 )
 
-// K8SCluster represents a single configured K8S cluster.
+// K8SCluster represents a single configured K8S cluster. It wraps a rest.Config objects,
+// as well as a Namespace and KSA it will act as.
+//
 //
 type K8SCluster struct {
 	// RestConfig is the main config for creating rest clients using generated libraries.
@@ -24,7 +26,7 @@ type K8SCluster struct {
 	//
 	// The URL can be extracted with rest.DefaultServerURLFor(RestConfig)
 	// Http client properly configured to talk with K8SAPIserver directly: rest.HTTPClientFor(RestConfig)
-	RestConfig *rest.Config
+	RestConfig *rest.Config `json:-`
 
 	// The name should be mangled - gke_PROJECT_LOCATION_NAME or connectgateway_PROJECT_NAME
 	// or hostname.
@@ -45,19 +47,44 @@ type K8SCluster struct {
 	KSA string
 
 	// TODO: lazy load. Should be cached.
-	client *kubernetes.Clientset
+	client *kubernetes.Clientset `json:-`
 
 	// RawConfig can be a GCP res.Config
-	RawConfig interface{}
+	RawConfig interface{} `json:-`
 
-	project, location, name string
+	// Cached (not sure if needed)
+	project, location, name string `json:-`
+}
+
+func NewK8SCluster(ctx context.Context, ns, name string) *K8SCluster {
+	return &K8SCluster{Name: name}
+}
+
+
+func (kr *K8SCluster) String() string {
+	return fmt.Sprintf("\"%s\"", kr.Name)
 }
 
 // Return a new K8S cluster with same config and client, but different default
 // namespace and KSA.
-func (kr *K8SCluster) WithNamespace(ns, ksa string) *K8SCluster {
+// The GetToken() requests will use the specified K8S namespace and KSA instead of the
+// default.
+func (kr *K8SCluster) RunAs(ns, ksa string) *K8SCluster {
 	return &K8SCluster{RestConfig: kr.RestConfig, client: kr.Client(), Name: kr.Name,
 		Namespace: ns, KSA: ksa}
+}
+
+func (k *K8SCluster) Label(ctx context.Context, name string) string {
+	switch name {
+	case "location": return k.Location()
+	case "project":
+		k.GcpInfo()
+		return k.project
+	case "name":
+		k.GcpInfo()
+		return k.name
+	}
+	return ""
 }
 
 func (k *K8SCluster) Location() string {
@@ -68,6 +95,9 @@ func (k *K8SCluster) Location() string {
 }
 
 func (k *K8SCluster) GcpInfo() (string, string, string) {
+	if k.location != "" {
+		return k.project, k.location, k.Name
+	}
 	cf := k.Name
 	if strings.HasPrefix(cf, "gke_") {
 		parts := strings.Split(cf, "_")
@@ -94,6 +124,11 @@ func (k *K8SCluster) GcpInfo() (string, string, string) {
 	return "", "", cf
 }
 
+type K8SRest interface {
+	// RestConfig returns the base config, which is used for all other clients.
+	RestConfig() *rest.Config
+}
+
 // Client returns a clientset for accessing the core objects.
 func (kr *K8SCluster) Client() *kubernetes.Clientset {
 	if kr.client == nil {
@@ -109,30 +144,32 @@ func (kr *K8SCluster) Client() *kubernetes.Clientset {
 // RestClient returns a K8S RESTClient for a specific resource - without
 // generated interfaces.
 //
-// apiPath is typically /api or /apis
-// version is v1, etc
 // group is "" for core resources.
+// version is v1, etc
+//
 // Serializer defaults to scheme.Codecs.WithoutConversion()
-func (kr *K8SCluster) RestClient(apiPath, version string, group string,	c runtime.NegotiatedSerializer) (*rest.RESTClient, error) {
-	config := kr.ConfigFor(apiPath, version, group, c)
-	restClient, err := rest.RESTClientFor(config)
-	return restClient, err
-}
+//
+// This results in a HttpClient configured with the client certs and server address, and
+// a base URL like /apis/foo.com/v1
+//
+//
+//
+func (kr *K8SCluster) RestClient(group string, version string) (*rest.RESTClient, error) {
 
-// ConfigFor returns a new rest.Config for a specific resource.
-func (kr *K8SCluster) ConfigFor(apiPath, version string, group string, c runtime.NegotiatedSerializer) *rest.Config {
 	// makes a copy - we won't change the template
 	config := *kr.RestConfig
 
-	config.APIPath = apiPath
-	config.GroupVersion = &schema.GroupVersion{Version: version, Group: group}
-	if c == nil {
-		c = scheme.Codecs.WithoutConversion()
+	config.APIPath = "/apis"
+	if group == "" {
+		config.APIPath = "/api"
 	}
-	config.NegotiatedSerializer = c
+	config.GroupVersion = &schema.GroupVersion{Version: version, Group: group}
 
-	return &config
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+	restClient, err := rest.RESTClientFor(&config)
+	return restClient, err
 }
+
 
 func (k *K8SCluster) GetToken(ctx context.Context, aud string) (string, error) {
 	if k.KSA == "" {
@@ -186,4 +223,19 @@ func (kr *K8SCluster) GetSecret(ctx context.Context, ns string, name string) (ma
 	}
 
 	return s.Data, nil
+}
+
+// Experiments
+
+func Get[T interface{}]() {
+
+}
+
+func List[T interface{}](func(T) bool) {
+
+}
+
+// K8SClient is a typed wrapper for a REST client for a specific resource.
+type K8SClient[T interface{}] struct {
+
 }

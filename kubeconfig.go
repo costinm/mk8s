@@ -89,11 +89,11 @@ func (kr *K8S) LoadKubeConfig(configFile string) error {
 				continue
 			}
 			// Can set restCfg.RateLimiter to replace defaults
-			if kr.Config.QPS > 0 {
-				restConfig.QPS = kr.Config.QPS // default is 5
+			if kr.QPS > 0 {
+				restConfig.QPS = kr.QPS // default is 5
 			}
-			if kr.Config.Burst > 0 {
-				restConfig.Burst = kr.Config.Burst // default 10
+			if kr.Burst > 0 {
+				restConfig.Burst = kr.Burst // default 10
 			}
 			kcc := &K8SCluster {
 				Name:       k,

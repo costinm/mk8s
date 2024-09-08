@@ -8,8 +8,8 @@ import (
 	k8s "github.com/costinm/mk8s"
 )
 
-// If not cluster is explicitly set, try to autodetect a cluster in GKE or HUB
-func (gke *GKE) autodetect(ctx context.Context, findClusterN string) error {
+// If not cluster is explicitly set, try to Autodetect a cluster in GKE or HUB
+func (gke *GKE) Autodetect(ctx context.Context, findClusterN string) error {
 	// file or env or MDS
 	_, err := gke.LoadGKEClusters(ctx, "", "")
 	if err != nil {

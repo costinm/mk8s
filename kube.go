@@ -2,10 +2,12 @@ package mk8s
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"net"
 	"os"
 	"strings"
+	"sync"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/cert"
@@ -14,8 +16,9 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// K8SConfig has general config for a set of clusters.
-type K8SConfig struct {
+// K8S implements the common interface for a set of K8S APIservers
+// or servers implementing K8S patterns.
+type K8S struct {
 	// Namespace to use by default
 	Namespace string
 
@@ -27,12 +30,6 @@ type K8SConfig struct {
 
 	// Burst overrides the default 10 burst in the client.
 	Burst int
-}
-
-// K8S implements the common interface for a set of K8S APIservers
-// or servers implementing K8S patterns.
-type K8S struct {
-	Config *K8SConfig
 
 	// Primary config cluster - current context in config, in-cluster
 	// picked by config
@@ -43,22 +40,34 @@ type K8S struct {
 	ByName map[string]*K8SCluster
 }
 
+var (
+	perApp = sync.OnceValue[*K8S](func() *K8S {
+		k, _ := New(context.Background(), "", "")
+		return k
+	})
+)
+
+func Default() *K8S {
+	return perApp()
+}
+
+func NewK8SSet(ctx context.Context, ns, name string) *K8S {
+	return &K8S{}
+}
+
 // NewK8S will initialize a K8S cluster set.
 //
 // If running in cluster, the 'local' cluster will be the default.
 // Additional clusters can be loaded from istio kubeconfig files, kubeconfig, GKE, Fleet.
-func New(ctx context.Context, kc *K8SConfig) (*K8S, error) {
-	if kc == nil {
-		kc = &K8SConfig{}
-	}
+func New(ctx context.Context, ns, name string) (*K8S, error) {
+	k := &K8S{
+		ByName: map[string]*K8SCluster{}}
+	err := k.init(ctx)
 	logging := os.Getenv("KLOG_FLAGS")
 	if logging != "" {
 		// Env instead of CLI args
 		SetK8SLogging(logging)
 	}
-	k := &K8S{Config: kc,
-		ByName: map[string]*K8SCluster{}}
-	err := k.init(ctx)
 	return k, err
 }
 
@@ -101,6 +110,7 @@ func (kr *K8S) init(ctx context.Context) error {
 
 // Init klog.InitFlags from an env (to avoid messing with the CLI of
 // the app). For example -v=9 lists full request content, -v=7 lists requests headers
+// TODO: integrate with the dynamic logging.
 func SetK8SLogging(flags string) {
 	// TODO: dynamic
 	fs := &flag.FlagSet{}
@@ -182,5 +192,8 @@ func Is404(err error) bool {
 // GetToken returns a token with the given audience for the default KSA, using CreateToken request.
 // Used by the STS token exchanger.
 func (kr *K8S) GetToken(ctx context.Context, aud string) (string, error) {
-	return kr.Default.GetTokenRaw(ctx, kr.Config.Namespace, kr.Config.KSA, aud)
+	if kr.Default == nil {
+		return "", errors.New("No default cluster")
+	}
+	return kr.Default.GetTokenRaw(ctx, kr.Default.Namespace, kr.Default.KSA, aud)
 }
